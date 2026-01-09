@@ -1,6 +1,7 @@
 /**
  * CloudDrop - Durable Object for room management
  * Manages WebSocket connections and signaling for P2P file sharing
+ * Supports optional password protection for secure rooms
  */
 
 export interface Env {
@@ -37,22 +38,106 @@ interface PeerAttachment {
  * Room Durable Object - handles WebSocket connections for a room (based on IP)
  * Uses WebSocket Hibernation API for cost efficiency
  * Peer data is stored in WebSocket attachments to survive hibernation
+ * Supports optional password protection for secure rooms
  */
 export class Room {
   private state: DurableObjectState;
+  private passwordHash: string | null; // Password hash for secure rooms (null = no password)
 
   constructor(state: DurableObjectState, _env: Env) {
     this.state = state;
+    this.passwordHash = null;
+
+    // Load password hash from storage on initialization
+    this.state.blockConcurrencyWhile(async () => {
+      this.passwordHash = await this.state.storage.get<string>('passwordHash') || null;
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    
+
     if (url.pathname === '/ws') {
       return this.handleWebSocket(request);
     }
 
+    if (url.pathname === '/set-password') {
+      // Set room password (only if not already set)
+      return this.handleSetPassword(request);
+    }
+
+    if (url.pathname === '/check-password') {
+      // Check if room has password protection
+      return this.handleCheckPassword(request);
+    }
+
     return new Response('Not Found', { status: 404 });
+  }
+
+  /**
+   * Check if room requires password
+   */
+  private handleCheckPassword(_request: Request): Response {
+    return new Response(JSON.stringify({
+      hasPassword: this.passwordHash !== null
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Set room password (only if not already set)
+   * This is called by the first user who creates the room with a password
+   */
+  private async handleSetPassword(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    // Only allow setting password if it's not already set
+    if (this.passwordHash !== null) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Password already set for this room'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    try {
+      const body = await request.json() as { passwordHash: string };
+
+      if (!body.passwordHash || typeof body.passwordHash !== 'string') {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Invalid password hash'
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Store password hash
+      this.passwordHash = body.passwordHash;
+      await this.state.storage.put('passwordHash', body.passwordHash);
+
+      console.log('[Room] Password set for room');
+
+      return new Response(JSON.stringify({
+        success: true
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Invalid request body'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
   }
 
   private handleWebSocket(request: Request): Response {
@@ -65,6 +150,9 @@ export class Room {
     // Get room code from header (passed by index.ts)
     const roomCode = request.headers.get('X-Room-Code') || '';
 
+    // Get password hash (will be verified after connection is established)
+    const providedPasswordHash = request.headers.get('X-Room-Password-Hash');
+
     // Create WebSocket pair
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -72,6 +160,31 @@ export class Room {
     // Accept the WebSocket with hibernation API
     // Use tag to store room code (survives hibernation)
     this.state.acceptWebSocket(server, [roomCode]);
+
+    // If room is password-protected, verify immediately after accept
+    if (this.passwordHash !== null) {
+      if (!providedPasswordHash) {
+        // Send error message then close
+        server.send(JSON.stringify({
+          type: 'error',
+          error: 'PASSWORD_REQUIRED',
+          message: '此房间需要密码'
+        }));
+        server.close(4001, 'PASSWORD_REQUIRED');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+
+      if (providedPasswordHash !== this.passwordHash) {
+        // Send error message then close
+        server.send(JSON.stringify({
+          type: 'error',
+          error: 'PASSWORD_INCORRECT',
+          message: '密码错误'
+        }));
+        server.close(4002, 'PASSWORD_INCORRECT');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+    }
 
     return new Response(null, {
       status: 101,

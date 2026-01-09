@@ -28,6 +28,15 @@ export default {
       return handleRoomId(request);
     }
 
+    // Handle room password APIs
+    if (url.pathname === '/api/room/set-password') {
+      return handleSetRoomPassword(request, env);
+    }
+
+    if (url.pathname === '/api/room/check-password') {
+      return handleCheckRoomPassword(request, env);
+    }
+
     // Handle ICE servers request (for TURN credentials)
     if (url.pathname === '/api/ice-servers') {
       return handleIceServers(env);
@@ -45,21 +54,21 @@ export default {
  */
 async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  
+
   // Check for explicit room parameter first
   const explicitRoom = url.searchParams.get('room');
-  
+
   let roomId: string;
   let roomCode: string; // User-friendly room code to display
-  
+
   if (explicitRoom && /^[a-zA-Z0-9]{4,16}$/.test(explicitRoom)) {
     // Use explicit room code (4-16 alphanumeric characters)
     roomCode = explicitRoom.toUpperCase();
     roomId = `custom-${explicitRoom.toLowerCase()}`;
   } else {
     // Fall back to IP-based room assignment
-    const clientIP = request.headers.get('CF-Connecting-IP') || 
-                     request.headers.get('X-Forwarded-For')?.split(',')[0] || 
+    const clientIP = request.headers.get('CF-Connecting-IP') ||
+                     request.headers.get('X-Forwarded-For')?.split(',')[0] ||
                      'default';
     roomId = await generateRoomId(clientIP);
     // For auto-assigned rooms, use first 6 chars of hash as display code
@@ -76,6 +85,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   // Pass room code via header so Room can include it in join response
   const headers = new Headers(request.headers);
   headers.set('X-Room-Code', roomCode);
+
+  // Pass password hash if provided (from URL query parameter)
+  const passwordHash = url.searchParams.get('passwordHash');
+  if (passwordHash) {
+    headers.set('X-Room-Password-Hash', passwordHash);
+  }
 
   return roomStub.fetch(new Request(wsUrl.toString(), {
     headers,
@@ -200,7 +215,7 @@ function expandIPv6(ip: string): string {
     const lastColon = ip.lastIndexOf(':');
     ip = ip.substring(0, lastColon);
   }
-  
+
   // Handle :: abbreviation
   if (ip.includes('::')) {
     const parts = ip.split('::');
@@ -211,7 +226,72 @@ function expandIPv6(ip: string): string {
     const full = [...left, ...middle, ...right];
     return full.map(g => g.padStart(4, '0')).join(':');
   }
-  
+
   // Already full, just pad each group
   return ip.split(':').map(g => g.padStart(4, '0')).join(':');
+}
+
+/**
+ * Handle room password setting
+ * Forwards request to the appropriate Room Durable Object
+ */
+async function handleSetRoomPassword(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const roomParam = url.searchParams.get('room');
+
+  if (!roomParam || !/^[a-zA-Z0-9]{4,16}$/.test(roomParam)) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Invalid room code format'
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const roomId = `custom-${roomParam.toLowerCase()}`;
+  const roomObjectId = env.ROOM.idFromName(roomId);
+  const roomStub = env.ROOM.get(roomObjectId);
+
+  // Forward request to Room Durable Object
+  const roomUrl = new URL(request.url);
+  roomUrl.pathname = '/set-password';
+
+  return roomStub.fetch(new Request(roomUrl.toString(), {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+  }));
+}
+
+/**
+ * Handle room password check
+ * Forwards request to the appropriate Room Durable Object
+ */
+async function handleCheckRoomPassword(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const roomParam = url.searchParams.get('room');
+
+  if (!roomParam || !/^[a-zA-Z0-9]{4,16}$/.test(roomParam)) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Invalid room code format'
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const roomId = `custom-${roomParam.toLowerCase()}`;
+  const roomObjectId = env.ROOM.idFromName(roomId);
+  const roomStub = env.ROOM.get(roomObjectId);
+
+  // Forward request to Room Durable Object
+  const roomUrl = new URL(request.url);
+  roomUrl.pathname = '/check-password';
+
+  return roomStub.fetch(new Request(roomUrl.toString(), {
+    method: 'GET',
+    headers: request.headers,
+  }));
 }

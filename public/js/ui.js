@@ -646,10 +646,136 @@ export function updatePersistentToast(id, message, type) {
 export function hidePersistentToast(id) {
   const toast = persistentToasts.get(id);
   if (!toast) return;
-  
+
   toast.classList.add('hiding');
   setTimeout(() => {
     toast.remove();
     persistentToasts.delete(id);
   }, 300);
+}
+
+// ============================================
+// Secure Room UI Functions
+// ============================================
+
+/**
+ * Show password strength indicator
+ * @param {number} strength - Strength level (0-3): 0=weak, 1=fair, 2=good, 3=strong
+ */
+export function showPasswordStrength(strength) {
+  const container = document.getElementById('passwordStrength');
+  const fill = document.getElementById('passwordStrengthFill');
+  const text = document.getElementById('passwordStrengthText');
+
+  if (!container || !fill || !text) return;
+
+  container.style.display = 'flex';
+
+  const strengthConfig = {
+    0: { width: '25%', color: '#f87171', text: '弱' },
+    1: { width: '50%', color: '#fbbf24', text: '一般' },
+    2: { width: '75%', color: '#34d399', text: '良好' },
+    3: { width: '100%', color: '#10b981', text: '强' }
+  };
+
+  const config = strengthConfig[strength] || strengthConfig[0];
+
+  fill.style.width = config.width;
+  fill.style.background = config.color;
+  text.textContent = config.text;
+  text.style.color = config.color;
+}
+
+/**
+ * Hide password strength indicator
+ */
+export function hidePasswordStrength() {
+  const container = document.getElementById('passwordStrength');
+  if (container) {
+    container.style.display = 'none';
+  }
+}
+
+/**
+ * Show join room modal with optional pre-filled room code
+ * @param {string} roomCode - Optional room code to pre-fill
+ * @param {boolean} passwordRequired - Whether password input should be shown
+ */
+export function showJoinRoomModal(roomCode = '', passwordRequired = false) {
+  const roomInput = document.getElementById('roomInput');
+  const passwordSection = document.getElementById('joinRoomPasswordSection');
+  const passwordInput = document.getElementById('joinRoomPassword');
+
+  // Pre-fill room code if provided
+  if (roomInput && roomCode) {
+    roomInput.value = roomCode;
+    roomInput.readOnly = true; // Make it read-only since we know the room
+  } else if (roomInput) {
+    roomInput.value = '';
+    roomInput.readOnly = false;
+  }
+
+  // Show/hide password section
+  if (passwordSection) {
+    passwordSection.style.display = passwordRequired ? 'block' : 'none';
+  }
+
+  // Clear password input
+  if (passwordInput) {
+    passwordInput.value = '';
+  }
+
+  showModal('joinRoomModal');
+
+  // Focus appropriate input
+  if (passwordRequired && passwordInput) {
+    passwordInput.focus();
+  } else if (roomInput && !roomCode) {
+    roomInput.focus();
+  }
+}
+
+/**
+ * Show password input section in join room modal
+ */
+export function showJoinRoomPasswordSection() {
+  const passwordSection = document.getElementById('joinRoomPasswordSection');
+  const passwordInput = document.getElementById('joinRoomPassword');
+
+  if (passwordSection) {
+    passwordSection.style.display = 'block';
+    // Add animation
+    passwordSection.style.animation = 'fadeSlideDown 0.3s ease';
+  }
+
+  if (passwordInput) {
+    passwordInput.focus();
+  }
+}
+
+/**
+ * Hide password input section in join room modal
+ */
+export function hideJoinRoomPasswordSection() {
+  const passwordSection = document.getElementById('joinRoomPasswordSection');
+  if (passwordSection) {
+    passwordSection.style.display = 'none';
+  }
+}
+
+/**
+ * Update room lock icon display
+ * @param {boolean} isSecure - Whether the room is password-protected
+ */
+export function updateRoomSecurityBadge(isSecure) {
+  const lockIcon = document.getElementById('roomLockIcon');
+  if (lockIcon) {
+    if (isSecure) {
+      lockIcon.classList.add('locked');
+      lockIcon.title = '加密房间 - 已启用密码保护';
+    } else {
+      lockIcon.classList.remove('locked');
+      lockIcon.title = '点击创建加密房间';
+    }
+  }
 }

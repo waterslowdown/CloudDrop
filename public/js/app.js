@@ -13,14 +13,14 @@ class CloudDrop {
     this.ws = null;
     this.webrtc = null;
     this.selectedPeer = null;
-    
+
     // Try to get saved name from localStorage, otherwise generate new one
     const savedName = localStorage.getItem('clouddrop_device_name');
     this.deviceName = savedName || ui.generateDisplayName();
     if (!savedName) {
       localStorage.setItem('clouddrop_device_name', this.deviceName);
     }
-    
+
     this.deviceType = ui.detectDeviceType();
     this.roomCode = null;
     this.browserInfo = ui.getDetailedDeviceInfo();
@@ -29,9 +29,14 @@ class CloudDrop {
     this.unreadMessages = new Map(); // peerId -> unread count
     this.pendingFileRequest = null; // Current pending file request waiting for user decision
     this.currentTransfer = null; // Current active transfer { peerId, fileId, fileName, direction }
-    
+
     // Trusted devices - auto-accept files from these devices
     this.trustedDevices = this.loadTrustedDevices();
+
+    // Room password state
+    this.roomPassword = null; // Room password (plaintext, only in memory)
+    this.roomPasswordHash = null; // Password hash for server verification
+    this.isSecureRoom = false; // Whether current room is password-protected
   }
 
   /**
@@ -179,12 +184,148 @@ class CloudDrop {
     return info;
   }
 
+  /**
+   * Create a secure room with password
+   * @param {string} roomCode - Room code
+   * @param {string} password - Room password (min 6 characters)
+   */
+  async createSecureRoom(roomCode, password) {
+    // Validate password
+    if (!password || password.length < 6) {
+      ui.showToast('密码至少需要6位字符', 'error');
+      return false;
+    }
+
+    // Validate room code
+    if (!roomCode || !/^[a-zA-Z0-9]{4,16}$/.test(roomCode)) {
+      ui.showToast('房间号格式无效 (4-16位字母数字)', 'error');
+      return false;
+    }
+
+    try {
+      // Generate password hash for server
+      const passwordHash = await cryptoManager.hashPasswordForServer(password, roomCode);
+
+      // Set room password on server
+      const response = await fetch(`/api/room/set-password?room=${roomCode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passwordHash })
+      });
+
+      const result = await response.json();
+
+      if (!result.success) {
+        ui.showToast(`创建失败: ${result.error}`, 'error');
+        return false;
+      }
+
+      // Set room password for client-side encryption
+      await cryptoManager.setRoomPassword(password, roomCode);
+
+      // Store password info locally
+      this.roomPassword = password;
+      this.roomPasswordHash = passwordHash;
+      this.isSecureRoom = true;
+
+      // Update security badge
+      this.updateRoomSecurityBadge();
+
+      console.log('[App] Secure room created:', roomCode);
+      return true;
+    } catch (error) {
+      console.error('[App] Failed to create secure room:', error);
+      ui.showToast('创建加密房间失败', 'error');
+      return false;
+    }
+  }
+
+  /**
+   * Check if a room requires password
+   * @param {string} roomCode - Room code
+   * @returns {Promise<boolean>} - true if password required
+   */
+  async checkRoomPassword(roomCode) {
+    try {
+      const response = await fetch(`/api/room/check-password?room=${roomCode}`);
+      const result = await response.json();
+      return result.hasPassword || false;
+    } catch (error) {
+      console.error('[App] Failed to check room password:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Join a secure room with password
+   * @param {string} roomCode - Room code
+   * @param {string} password - Room password
+   */
+  async joinSecureRoom(roomCode, password) {
+    if (!password) {
+      ui.showToast('请输入房间密码', 'error');
+      return false;
+    }
+
+    // Normalize roomCode to uppercase (must match creation)
+    const normalizedRoomCode = roomCode.toUpperCase();
+
+    try {
+      // Generate password hash (using normalized room code)
+      const passwordHash = await cryptoManager.hashPasswordForServer(password, normalizedRoomCode);
+
+      // Set room password for client-side encryption
+      await cryptoManager.setRoomPassword(password, normalizedRoomCode);
+
+      // Store password info
+      this.roomPassword = password;
+      this.roomPasswordHash = passwordHash;
+      this.isSecureRoom = true;
+
+      // Update security badge
+      this.updateRoomSecurityBadge();
+
+      console.log('[App] Joining secure room:', normalizedRoomCode);
+      return true;
+    } catch (error) {
+      console.error('[App] Failed to prepare for secure room:', error);
+      ui.showToast('加入加密房间失败', 'error');
+      return false;
+    }
+  }
+
+  /**
+   * Clear room password (when leaving secure room)
+   */
+  clearRoomPassword() {
+    this.roomPassword = null;
+    this.roomPasswordHash = null;
+    this.isSecureRoom = false;
+    cryptoManager.clearRoomPassword();
+    this.updateRoomSecurityBadge();
+    console.log('[App] Room password cleared');
+  }
+
   async init() {
     await cryptoManager.generateKeyPair();
     // Check URL for room code - only use explicit room parameter
     // If no room param, let server assign room based on IP
     const params = new URLSearchParams(location.search);
-    this.roomCode = params.get('room') || null; // null = auto-assign by IP
+    const roomParam = params.get('room');
+    this.roomCode = roomParam ? roomParam.toUpperCase() : null; // Normalize to uppercase
+
+    // If joining a specific room, check if it requires password
+    if (this.roomCode) {
+      const requiresPassword = await this.checkRoomPassword(this.roomCode);
+      if (requiresPassword) {
+        // Show password prompt before connecting
+        ui.showJoinRoomModal(this.roomCode, true); // true = password required
+        // Will connect after user enters password
+        this.setupEventListeners(); // Setup listeners so modal works
+        return;
+      }
+    }
+
     this.updateRoomDisplay();
     this.connectWebSocket();
     this.setupEventListeners();
@@ -215,22 +356,67 @@ class CloudDrop {
     }
   }
 
+  /**
+   * Switch to a different room without page refresh
+   * Used after creating a secure room to avoid re-entering password
+   * @param {string} newRoomCode - The room code to switch to
+   */
+  switchRoom(newRoomCode) {
+    // Close existing WebSocket connection
+    if (this.ws) {
+      this.ws.onclose = null; // Prevent auto-reconnect
+      this.ws.close();
+    }
+
+    // Clear peers
+    this.peers.clear();
+    ui.clearPeersGrid(document.getElementById('peersGrid'));
+    this.webrtc?.closeAll();
+
+    // Update room code
+    this.roomCode = newRoomCode;
+    this.updateRoomDisplay();
+    this.updateRoomSecurityBadge();
+
+    // Update URL without refresh
+    const url = new URL(location.href);
+    url.searchParams.set('room', newRoomCode);
+    history.pushState({}, '', url.toString());
+
+    // Reconnect to new room
+    this.connectWebSocket();
+  }
+
   connectWebSocket() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     // If roomCode is set, use it; otherwise let server assign based on IP
-    const wsUrl = this.roomCode 
+    let wsUrl = this.roomCode
       ? `${protocol}//${location.host}/ws?room=${this.roomCode}`
       : `${protocol}//${location.host}/ws`;
+
+    // For WebSocket connections, we can't use custom headers directly,
+    // but we can pass auth info via subprotocol or upgrade request modifications
+    // Cloudflare Workers can access request headers during upgrade
+    // We'll use a custom header through fetch API upgrade mechanism
+
+    // Create connection with password hash if available
+    if (this.isSecureRoom && this.roomPasswordHash) {
+      // Note: Browser WebSocket doesn't support custom headers directly
+      // But Cloudflare Workers can intercept the upgrade request
+      // We pass the password hash through a query parameter (over WSS it's encrypted)
+      wsUrl += `${this.roomCode ? '&' : '?'}passwordHash=${encodeURIComponent(this.roomPasswordHash)}`;
+    }
+
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       ui.updateConnectionStatus('connected', '已连接');
-      
+
       // Clear existing peers on reconnect to avoid duplicates
       this.peers.clear();
       ui.clearPeersGrid(document.getElementById('peersGrid'));
       this.webrtc?.closeAll(); // Also close stale WebRTC connections
-      
+
       this.ws.send(JSON.stringify({
         type: 'join',
         data: {
@@ -241,14 +427,44 @@ class CloudDrop {
       }));
     };
 
-    this.ws.onmessage = (e) => this.handleSignaling(JSON.parse(e.data));
+    this.ws.onmessage = (e) => {
+      const message = JSON.parse(e.data);
 
-    this.ws.onclose = () => {
+      // Handle password error messages
+      if (message.type === 'error') {
+        if (message.error === 'PASSWORD_REQUIRED' || message.error === 'PASSWORD_INCORRECT') {
+          ui.showToast(message.message || '密码错误', 'error');
+          this.clearRoomPassword();
+          // WebSocket will be closed by server, onclose handler will show join modal
+          return;
+        }
+      }
+
+      this.handleSignaling(message);
+    };
+
+    this.ws.onclose = (event) => {
+      // Handle password authentication errors (custom close codes)
+      if (event.code === 4001 || event.code === 4002) {
+        // Password error - don't auto-reconnect
+        ui.updateConnectionStatus('disconnected', '密码错误');
+        ui.showToast(event.code === 4001 ? '此房间需要密码' : '房间密码错误', 'error');
+        this.clearRoomPassword();
+        // Show join room modal again with password input
+        if (this.roomCode) {
+          ui.showJoinRoomModal(this.roomCode);
+        }
+        return;
+      }
+
       ui.updateConnectionStatus('disconnected', '已断开');
       setTimeout(() => this.connectWebSocket(), 3000);
     };
 
-    this.ws.onerror = () => ui.updateConnectionStatus('disconnected', '连接错误');
+    this.ws.onerror = (event) => {
+      console.error('[WebSocket] Error:', event);
+      ui.updateConnectionStatus('disconnected', '连接错误');
+    };
 
     this.webrtc = new WebRTCManager({
       send: (msg) => this.ws.readyState === WebSocket.OPEN && this.ws.send(JSON.stringify(msg))
@@ -697,6 +913,39 @@ class CloudDrop {
     location.href = url.toString();
   }
 
+  /**
+   * Calculate password strength (0-3)
+   * 0 = weak, 1 = fair, 2 = good, 3 = strong
+   */
+  calculatePasswordStrength(password) {
+    let strength = 0;
+
+    if (password.length >= 6) strength++;
+    if (password.length >= 10) strength++;
+    if (/[a-z]/.test(password) && /[A-Z]/.test(password)) strength++;
+    if (/\d/.test(password)) strength++;
+    if (/[^a-zA-Z0-9]/.test(password)) strength++;
+
+    // Normalize to 0-3 scale
+    return Math.min(Math.floor(strength / 1.5), 3);
+  }
+
+  /**
+   * Update room lock icon display
+   */
+  updateRoomSecurityBadge() {
+    const lockIcon = document.getElementById('roomLockIcon');
+    if (lockIcon) {
+      if (this.isSecureRoom) {
+        lockIcon.classList.add('locked');
+        lockIcon.title = '加密房间 - 已启用密码保护';
+      } else {
+        lockIcon.classList.remove('locked');
+        lockIcon.title = '点击创建加密房间';
+      }
+    }
+  }
+
   saveMessage(peerId, message) {
     if (!this.messageHistory.has(peerId)) {
       this.messageHistory.set(peerId, []);
@@ -953,14 +1202,125 @@ class CloudDrop {
     // Join room modal
     document.getElementById('joinRoomModalClose')?.addEventListener('click', () => ui.hideModal('joinRoomModal'));
     document.getElementById('joinRoomCancel')?.addEventListener('click', () => ui.hideModal('joinRoomModal'));
-    document.getElementById('joinRoomConfirm')?.addEventListener('click', () => {
+    document.getElementById('joinRoomConfirm')?.addEventListener('click', async () => {
       const code = document.getElementById('roomInput').value.trim();
-      this.joinRoom(code);
+      const password = document.getElementById('joinRoomPassword').value;
+
+      if (!code) {
+        ui.showToast('请输入房间号', 'error');
+        return;
+      }
+
+      // If password is provided, join secure room
+      if (password) {
+        const success = await this.joinSecureRoom(code, password);
+        if (success) {
+          ui.hideModal('joinRoomModal');
+          // Use switchRoom to avoid page refresh (preserves password in memory)
+          this.switchRoom(code.toUpperCase());
+        }
+      } else {
+        // Check if room requires password
+        const requiresPassword = await this.checkRoomPassword(code);
+        if (requiresPassword) {
+          // Show password input
+          ui.showJoinRoomPasswordSection();
+          ui.showToast('此房间需要密码', 'warning');
+        } else {
+          // Regular room join (no password needed, can use page refresh)
+          this.joinRoom(code);
+        }
+      }
     });
-    document.getElementById('roomInput')?.addEventListener('keydown', (e) => {
+    document.getElementById('roomInput')?.addEventListener('keydown', async (e) => {
       if (e.key === 'Enter') {
         const code = document.getElementById('roomInput').value.trim();
-        this.joinRoom(code);
+        const password = document.getElementById('joinRoomPassword').value;
+
+        if (password) {
+          const success = await this.joinSecureRoom(code, password);
+          if (success) {
+            ui.hideModal('joinRoomModal');
+            // Use switchRoom to avoid page refresh (preserves password in memory)
+            this.switchRoom(code.toUpperCase());
+          }
+        } else {
+          const requiresPassword = await this.checkRoomPassword(code);
+          if (requiresPassword) {
+            ui.showJoinRoomPasswordSection();
+            ui.showToast('此房间需要密码', 'warning');
+          } else {
+            this.joinRoom(code);
+          }
+        }
+      }
+    });
+
+    // Password toggle for join room modal
+    document.getElementById('joinPasswordToggle')?.addEventListener('click', () => {
+      const passwordInput = document.getElementById('joinRoomPassword');
+      const isPassword = passwordInput.type === 'password';
+      passwordInput.type = isPassword ? 'text' : 'password';
+    });
+
+    // Room lock icon click - create secure room or show info
+    document.getElementById('roomLockIcon')?.addEventListener('click', () => {
+      if (this.isSecureRoom) {
+        // Already in a secure room, show info toast
+        ui.showToast('当前已在加密房间中', 'info');
+        return;
+      }
+      // Generate a random room code for new secure room
+      const randomCode = this.generateRoomCode();
+      document.getElementById('secureRoomCode').value = randomCode;
+      document.getElementById('secureRoomPassword').value = '';
+      ui.hidePasswordStrength(); // Reset password strength indicator
+      ui.showModal('createSecureRoomModal');
+      document.getElementById('secureRoomPassword').focus();
+    });
+
+    // Create secure room modal
+    document.getElementById('createSecureRoomClose')?.addEventListener('click', () => ui.hideModal('createSecureRoomModal'));
+    document.getElementById('createSecureRoomCancel')?.addEventListener('click', () => ui.hideModal('createSecureRoomModal'));
+    document.getElementById('createSecureRoomConfirm')?.addEventListener('click', async () => {
+      const roomCode = document.getElementById('secureRoomCode').value.trim().toUpperCase();
+      const password = document.getElementById('secureRoomPassword').value;
+
+      if (!roomCode) {
+        ui.showToast('请输入房间号', 'error');
+        return;
+      }
+
+      if (!password || password.length < 6) {
+        ui.showToast('密码至少需要6位字符', 'error');
+        return;
+      }
+
+      const success = await this.createSecureRoom(roomCode, password);
+      if (success) {
+        ui.hideModal('createSecureRoomModal');
+        ui.showToast('加密房间创建成功', 'success');
+        // Switch to the new secure room without page refresh
+        // This preserves the password in memory so creator doesn't need to re-enter
+        this.switchRoom(roomCode);
+      }
+    });
+
+    // Password toggle for create secure room modal
+    document.getElementById('createPasswordToggle')?.addEventListener('click', () => {
+      const passwordInput = document.getElementById('secureRoomPassword');
+      const isPassword = passwordInput.type === 'password';
+      passwordInput.type = isPassword ? 'text' : 'password';
+    });
+
+    // Password strength indicator
+    document.getElementById('secureRoomPassword')?.addEventListener('input', (e) => {
+      const password = e.target.value;
+      if (password.length > 0) {
+        const strength = this.calculatePasswordStrength(password);
+        ui.showPasswordStrength(strength);
+      } else {
+        ui.hidePasswordStrength();
       }
     });
 

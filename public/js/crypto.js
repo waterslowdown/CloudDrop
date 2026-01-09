@@ -7,6 +7,8 @@ export class CryptoManager {
   constructor() {
     this.keyPair = null;
     this.sharedSecrets = new Map(); // peerId -> CryptoKey
+    this.roomKey = null; // Room-level encryption key (derived from password)
+    this.roomPasswordSet = false; // Flag to track if room password is set
   }
 
   /**
@@ -127,34 +129,82 @@ export class CryptoManager {
   }
 
   /**
-   * Encrypt a file chunk with metadata
+   * Encrypt a file chunk with metadata (dual-layer encryption)
+   * Layer 1: Room key encryption (if password is set)
+   * Layer 2: Peer-to-peer ECDH encryption
    * @param {string} peerId - Target peer ID
    * @param {ArrayBuffer} chunk - File chunk data
-   * @returns {Promise<ArrayBuffer>} Encrypted chunk with IV prepended
+   * @returns {Promise<ArrayBuffer>} Encrypted chunk with IVs prepended
    */
   async encryptChunk(peerId, chunk) {
-    const { encrypted, iv } = await this.encrypt(peerId, chunk);
-    
-    // Prepend IV to encrypted data for transmission
-    const result = new Uint8Array(iv.length + encrypted.byteLength);
-    result.set(iv, 0);
-    result.set(new Uint8Array(encrypted), iv.length);
-    
+    let data = chunk;
+    let roomIv = null;
+
+    // Layer 1: Room-level encryption (if password is set)
+    if (this.hasRoomPassword()) {
+      const roomEncrypted = await this.encryptWithRoomKey(data);
+      data = roomEncrypted.encrypted;
+      roomIv = roomEncrypted.iv;
+    }
+
+    // Layer 2: Peer-to-peer encryption
+    const { encrypted, iv: peerIv } = await this.encrypt(peerId, data);
+
+    // Format: [room_iv_length (1 byte)][room_iv (0 or 12 bytes)][peer_iv (12 bytes)][encrypted_data]
+    const roomIvLength = roomIv ? roomIv.length : 0;
+    const result = new Uint8Array(1 + roomIvLength + peerIv.length + encrypted.byteLength);
+
+    result[0] = roomIvLength; // Store room IV length
+    let offset = 1;
+
+    if (roomIv) {
+      result.set(roomIv, offset);
+      offset += roomIv.length;
+    }
+
+    result.set(peerIv, offset);
+    offset += peerIv.length;
+
+    result.set(new Uint8Array(encrypted), offset);
+
     return result.buffer;
   }
 
   /**
-   * Decrypt a file chunk with prepended IV
+   * Decrypt a file chunk with prepended IVs (dual-layer decryption)
+   * Layer 1: Peer-to-peer ECDH decryption
+   * Layer 2: Room key decryption (if password is set)
    * @param {string} peerId - Source peer ID
-   * @param {ArrayBuffer} data - Data with IV prepended
+   * @param {ArrayBuffer} data - Data with IVs prepended
    * @returns {Promise<ArrayBuffer>} Decrypted chunk
    */
   async decryptChunk(peerId, data) {
     const dataArray = new Uint8Array(data);
-    const iv = dataArray.slice(0, 12);
-    const encrypted = dataArray.slice(12);
-    
-    return this.decrypt(peerId, encrypted.buffer, iv);
+
+    // Parse format: [room_iv_length][room_iv][peer_iv][encrypted_data]
+    const roomIvLength = dataArray[0];
+    let offset = 1;
+
+    let roomIv = null;
+    if (roomIvLength > 0) {
+      roomIv = dataArray.slice(offset, offset + roomIvLength);
+      offset += roomIvLength;
+    }
+
+    const peerIv = dataArray.slice(offset, offset + 12);
+    offset += 12;
+
+    const encrypted = dataArray.slice(offset);
+
+    // Layer 1: Peer-to-peer decryption
+    let decrypted = await this.decrypt(peerId, encrypted.buffer, peerIv);
+
+    // Layer 2: Room-level decryption (if password is set)
+    if (this.hasRoomPassword() && roomIv) {
+      decrypted = await this.decryptWithRoomKey(decrypted, roomIv);
+    }
+
+    return decrypted;
   }
 
   /**
@@ -172,6 +222,151 @@ export class CryptoManager {
    */
   hasSharedSecret(peerId) {
     return this.sharedSecrets.has(peerId);
+  }
+
+  // ============================================
+  // Room-Level Encryption (Password-Based)
+  // ============================================
+
+  /**
+   * Derive a room encryption key from password using PBKDF2
+   * @param {string} password - Room password
+   * @param {string} roomCode - Room code (used as salt)
+   * @returns {Promise<CryptoKey>} Derived AES-GCM key
+   */
+  async deriveRoomKeyFromPassword(password, roomCode) {
+    // Encode password and room code (room code acts as salt)
+    const encoder = new TextEncoder();
+    const passwordBuffer = encoder.encode(password);
+    const saltBuffer = encoder.encode(`clouddrop-room-${roomCode}`);
+
+    // Import password as key material
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      passwordBuffer,
+      'PBKDF2',
+      false,
+      ['deriveKey']
+    );
+
+    // Derive AES-GCM key using PBKDF2 (100,000 iterations for security)
+    const roomKey = await crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: saltBuffer,
+        iterations: 100000,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      {
+        name: 'AES-GCM',
+        length: 256
+      },
+      false,
+      ['encrypt', 'decrypt']
+    );
+
+    return roomKey;
+  }
+
+  /**
+   * Set room password and derive encryption key
+   * @param {string} password - Room password
+   * @param {string} roomCode - Room code
+   */
+  async setRoomPassword(password, roomCode) {
+    if (!password || !roomCode) {
+      throw new Error('Password and room code are required');
+    }
+
+    this.roomKey = await this.deriveRoomKeyFromPassword(password, roomCode);
+    this.roomPasswordSet = true;
+    console.log('[Crypto] Room password set, encryption enabled');
+  }
+
+  /**
+   * Clear room password and key
+   */
+  clearRoomPassword() {
+    this.roomKey = null;
+    this.roomPasswordSet = false;
+    console.log('[Crypto] Room password cleared');
+  }
+
+  /**
+   * Check if room password is set
+   * @returns {boolean}
+   */
+  hasRoomPassword() {
+    return this.roomPasswordSet && this.roomKey !== null;
+  }
+
+  /**
+   * Encrypt data with room key (first encryption layer)
+   * @param {ArrayBuffer} data - Data to encrypt
+   * @returns {Promise<{encrypted: ArrayBuffer, iv: Uint8Array}>}
+   */
+  async encryptWithRoomKey(data) {
+    if (!this.hasRoomPassword()) {
+      // No room password, return data as-is
+      return { encrypted: data, iv: null };
+    }
+
+    // Generate random IV
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+
+    const encrypted = await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: iv
+      },
+      this.roomKey,
+      data
+    );
+
+    return { encrypted, iv };
+  }
+
+  /**
+   * Decrypt data with room key (first decryption layer)
+   * @param {ArrayBuffer} encryptedData - Encrypted data
+   * @param {Uint8Array} iv - Initialization vector
+   * @returns {Promise<ArrayBuffer>}
+   */
+  async decryptWithRoomKey(encryptedData, iv) {
+    if (!this.hasRoomPassword()) {
+      // No room password, return data as-is
+      return encryptedData;
+    }
+
+    if (!iv) {
+      throw new Error('IV is required for room key decryption');
+    }
+
+    const decrypted = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: iv
+      },
+      this.roomKey,
+      encryptedData
+    );
+
+    return decrypted;
+  }
+
+  /**
+   * Generate password hash for server verification (SHA-256)
+   * @param {string} password - Room password
+   * @param {string} roomCode - Room code (used as salt)
+   * @returns {Promise<string>} Hex-encoded hash
+   */
+  async hashPasswordForServer(password, roomCode) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(`${password}:${roomCode}:clouddrop`);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
   // ============================================
