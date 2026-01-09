@@ -31,9 +31,10 @@ class CloudDrop {
 
   async init() {
     await cryptoManager.generateKeyPair();
-    // Check URL for room code
+    // Check URL for room code - only use explicit room parameter
+    // If no room param, let server assign room based on IP
     const params = new URLSearchParams(location.search);
-    this.roomCode = params.get('room') || this.generateRoomCode();
+    this.roomCode = params.get('room') || null; // null = auto-assign by IP
     this.updateRoomDisplay();
     this.connectWebSocket();
     this.setupEventListeners();
@@ -44,6 +45,7 @@ class CloudDrop {
     this.setupVisualViewport();
   }
 
+  // Generate room code is only used for creating shareable room codes
   generateRoomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
@@ -53,12 +55,22 @@ class CloudDrop {
 
   updateRoomDisplay() {
     const el = document.getElementById('roomCode');
-    if (el) el.textContent = this.roomCode;
+    if (el) {
+      if (this.roomCode) {
+        el.textContent = this.roomCode;
+      } else {
+        // Auto-assigned room, show placeholder until we get the room ID from server
+        el.textContent = '自动分配中...';
+      }
+    }
   }
 
   connectWebSocket() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${location.host}/ws?room=${this.roomCode}`;
+    // If roomCode is set, use it; otherwise let server assign based on IP
+    const wsUrl = this.roomCode 
+      ? `${protocol}//${location.host}/ws?room=${this.roomCode}`
+      : `${protocol}//${location.host}/ws`;
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
@@ -162,6 +174,12 @@ class CloudDrop {
         console.log('[Signaling] My peer ID:', this.peerId);
         // Set peer ID for Perfect Negotiation pattern
         this.webrtc.setMyPeerId(this.peerId);
+        // Update room code from server if auto-assigned
+        if (msg.roomCode) {
+          this.roomCode = msg.roomCode;
+          this.updateRoomDisplay();
+          console.log('[Signaling] Room code:', this.roomCode);
+        }
         msg.peers?.forEach(p => this.addPeer(p));
         break;
       case 'peer-joined':
@@ -192,6 +210,11 @@ class CloudDrop {
   addPeer(peer) {
     this.peers.set(peer.id, peer);
     ui.addPeerToGrid(peer, document.getElementById('peersGrid'), (p, e) => this.onPeerClick(p, e));
+    
+    // Prewarm WebRTC connection for faster first transfer
+    if (this.webrtc) {
+      this.webrtc.prewarmConnection(peer.id);
+    }
   }
 
   removePeer(peerId) {

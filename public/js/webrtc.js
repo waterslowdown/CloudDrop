@@ -1,17 +1,27 @@
 /**
- * CloudDrop - WebRTC Manager (Optimized)
+ * CloudDrop - WebRTC Manager (Optimized v2)
  * Handles peer connections, data channels, and file transfer
- * with enhanced connection reliability and ICE restart support
+ * with enhanced connection reliability and fast P2P-to-relay fallback
+ * 
+ * Key optimizations:
+ * - Happy Eyeballs style parallel connection racing
+ * - Early ICE candidate type detection for smart fallback
+ * - Aggressive timeouts for faster fallback
+ * - Connection quality prediction
  */
 
 import { cryptoManager } from './crypto.js';
 
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
-const CONNECTION_TIMEOUT = 15000; // 15 seconds timeout for first attempt
-const SLOW_CONNECTION_THRESHOLD = 5000; // Show "slow connection" hint after 5 seconds
-const ICE_RESTART_DELAY = 2000; // Wait before ICE restart
-const MAX_ICE_RESTARTS = 2; // Maximum ICE restart attempts
-const DISCONNECTED_TIMEOUT = 5000; // Wait before treating disconnected as failed
+
+// Aggressive timeouts for faster fallback
+const CONNECTION_TIMEOUT = 8000; // 8 seconds max timeout (reduced from 15s)
+const FAST_FALLBACK_TIMEOUT = 3000; // 3 seconds - switch to relay if P2P not established
+const CANDIDATE_GATHERING_TIMEOUT = 2000; // 2 seconds to gather initial candidates
+const SLOW_CONNECTION_THRESHOLD = 2000; // Show "slow connection" hint after 2 seconds
+const ICE_RESTART_DELAY = 1000; // Reduced from 2s
+const MAX_ICE_RESTARTS = 1; // Reduced from 2 - fail fast, use relay
+const DISCONNECTED_TIMEOUT = 3000; // Reduced from 5s
 
 // Minimal fallback (only used if server is unreachable)
 const FALLBACK_ICE_SERVERS = [
@@ -225,8 +235,50 @@ export class WebRTCManager {
     
     this.relayMode = new Map(); // peerId -> boolean
     
-    // Pre-fetch ICE servers
+    // ICE candidate type tracking for smart fallback
+    this.candidateTypes = new Map(); // peerId -> Set<'host'|'srflx'|'relay'>
+    this.connectionQuality = new Map(); // peerId -> { p2pPossible: boolean, hasRelay: boolean }
+    
+    // Connection attempt tracking for racing
+    this.connectionRacing = new Map(); // peerId -> { p2pPromise, resolved, winner }
+    
+    // Pre-fetch ICE servers eagerly
     fetchIceServers();
+    
+    // Track peers for prewarming
+    this.knownPeers = new Set();
+    this.prewarmEnabled = true;
+  }
+
+  /**
+   * Prewarm connection to a peer (background, non-blocking)
+   * Called when a new peer is discovered to reduce latency for first transfer
+   */
+  prewarmConnection(peerId) {
+    if (!this.prewarmEnabled || this.knownPeers.has(peerId)) {
+      return;
+    }
+    
+    this.knownPeers.add(peerId);
+    
+    // Delay prewarm slightly to avoid overwhelming on initial peer list
+    setTimeout(() => {
+      // Only prewarm if no active connection/attempt exists
+      if (!this.connections.has(peerId) && !this.pendingConnections.has(peerId)) {
+        console.log(`[WebRTC] Prewarming connection to ${peerId}`);
+        this.createOffer(peerId).catch(err => {
+          console.log(`[WebRTC] Prewarm failed for ${peerId}: ${err.message}`);
+          // Prewarm failure is not critical, will retry on actual send
+        });
+      }
+    }, 500 + Math.random() * 500); // Stagger prewarm requests
+  }
+
+  /**
+   * Enable/disable connection prewarming
+   */
+  setPrewarmEnabled(enabled) {
+    this.prewarmEnabled = enabled;
   }
 
   /**
@@ -276,13 +328,27 @@ export class WebRTCManager {
         this.connections.set(peerId, pc);
         this.makingOffer.set(peerId, false);
         this.ignoreOffer.set(peerId, false);
+        
+        // Initialize candidate type tracking
+        if (!this.candidateTypes.has(peerId)) {
+          this.candidateTypes.set(peerId, new Set());
+        }
 
-        // ICE candidate handler
+        // ICE candidate handler with type tracking
         pc.onicecandidate = (e) => {
           if (e.candidate) {
+            // Track candidate types for smart fallback decisions
+            const candidateType = e.candidate.type; // 'host', 'srflx', 'relay'
+            this.candidateTypes.get(peerId)?.add(candidateType);
+            console.log(`[WebRTC] ICE candidate (${candidateType}) for ${peerId}`);
+            
+            // Update connection quality prediction
+            this._updateConnectionQuality(peerId);
+            
             this.signaling.send({ type: 'ice-candidate', to: peerId, data: e.candidate });
           } else {
             console.log(`[WebRTC] ICE gathering completed for ${peerId}`);
+            this._finalizeConnectionQuality(peerId);
           }
         };
 
@@ -342,7 +408,60 @@ export class WebRTCManager {
   }
 
   /**
-   * Handle ICE connection state changes with restart logic
+   * Update connection quality prediction based on gathered candidates
+   */
+  _updateConnectionQuality(peerId) {
+    const types = this.candidateTypes.get(peerId);
+    if (!types) return;
+    
+    const quality = {
+      hasHost: types.has('host'),
+      hasSrflx: types.has('srflx'),
+      hasRelay: types.has('relay'),
+      p2pPossible: types.has('host') || types.has('srflx'),
+      p2pLikely: types.has('srflx'), // Server reflexive = NAT traversal possible
+    };
+    
+    this.connectionQuality.set(peerId, quality);
+    console.log(`[WebRTC] Connection quality for ${peerId}:`, quality);
+  }
+
+  /**
+   * Finalize connection quality after ICE gathering completes
+   */
+  _finalizeConnectionQuality(peerId) {
+    const types = this.candidateTypes.get(peerId);
+    const quality = this.connectionQuality.get(peerId);
+    
+    if (!types || types.size === 0) {
+      console.warn(`[WebRTC] No ICE candidates gathered for ${peerId} - network issue`);
+      this.connectionQuality.set(peerId, { p2pPossible: false, hasRelay: false, networkIssue: true });
+    } else if (!quality?.p2pPossible && quality?.hasRelay) {
+      console.log(`[WebRTC] Only relay candidates for ${peerId} - will use relay`);
+    }
+  }
+
+  /**
+   * Check if we should fast-fallback to relay based on ICE candidate analysis
+   */
+  _shouldFastFallback(peerId) {
+    const quality = this.connectionQuality.get(peerId);
+    
+    // If we only have relay candidates after gathering, P2P won't work
+    if (quality && !quality.p2pPossible && quality.hasRelay) {
+      return true;
+    }
+    
+    // If we have a network issue (no candidates at all), use relay
+    if (quality?.networkIssue) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Handle ICE connection state changes with fast fallback logic
    */
   _handleIceConnectionStateChange(peerId, pc) {
     const state = pc.iceConnectionState;
@@ -358,19 +477,116 @@ export class WebRTCManager {
       console.log(`[WebRTC] ICE disconnected with ${peerId}, waiting for recovery...`);
       const timer = setTimeout(() => {
         if (pc.iceConnectionState === 'disconnected') {
-          console.log(`[WebRTC] ICE still disconnected, attempting restart...`);
-          this._attemptIceRestart(peerId, pc);
+          console.log(`[WebRTC] ICE still disconnected, fast-switching to relay...`);
+          // Don't attempt ICE restart, just switch to relay
+          this._switchToRelay(peerId, '连接中断，已切换到中继传输');
         }
       }, DISCONNECTED_TIMEOUT);
       this.disconnectedTimers.set(peerId, timer);
     } else if (state === 'failed') {
-      console.log(`[WebRTC] ICE failed with ${peerId}, attempting restart...`);
-      this._attemptIceRestart(peerId, pc);
+      // Check if we should attempt restart or just fallback to relay
+      const restartCount = this.iceRestartCounts.get(peerId) || 0;
+      const quality = this.connectionQuality.get(peerId);
+      
+      // If P2P wasn't likely anyway or we've already tried, just use relay
+      if (!quality?.p2pLikely || restartCount >= MAX_ICE_RESTARTS) {
+        console.log(`[WebRTC] ICE failed for ${peerId}, fast-switching to relay`);
+        this._switchToRelay(peerId, 'P2P连接失败，已切换到中继传输');
+      } else {
+        console.log(`[WebRTC] ICE failed with ${peerId}, attempting restart...`);
+        this._attemptIceRestart(peerId, pc);
+      }
     } else if (state === 'connected' || state === 'completed') {
       // Reset restart counter on successful connection
       this.iceRestartCounts.delete(peerId);
-      console.log(`[WebRTC] ICE connected with ${peerId}`);
+      // Clear relay mode if we have P2P
+      this.relayMode.delete(peerId);
+      console.log(`[WebRTC] ICE connected with ${peerId} (P2P mode)`);
     }
+  }
+
+  /**
+   * Switch to relay mode for a peer
+   */
+  _switchToRelay(peerId, message) {
+    if (!this.relayMode.get(peerId)) {
+      this.relayMode.set(peerId, true);
+      this._notifyConnectionState(peerId, 'relay', message);
+      console.log(`[WebRTC] Switched to relay mode for ${peerId}`);
+      
+      // Resolve any pending connection with relay mode
+      const racing = this.connectionRacing.get(peerId);
+      if (racing && !racing.resolved) {
+        racing.resolved = true;
+        racing.winner = 'relay';
+      }
+      
+      // Schedule background P2P recovery attempt
+      this._scheduleP2PRecovery(peerId);
+    }
+  }
+
+  /**
+   * Schedule a background attempt to recover P2P connection
+   * This runs periodically while in relay mode
+   */
+  _scheduleP2PRecovery(peerId) {
+    // Clear any existing recovery timer
+    const existingTimer = this._p2pRecoveryTimers?.get(peerId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+    
+    if (!this._p2pRecoveryTimers) {
+      this._p2pRecoveryTimers = new Map();
+    }
+    
+    // Attempt P2P recovery after 30 seconds
+    const P2P_RECOVERY_INTERVAL = 30000;
+    
+    const timer = setTimeout(async () => {
+      if (!this.relayMode.get(peerId)) {
+        return; // Already recovered or peer gone
+      }
+      
+      console.log(`[WebRTC] Attempting P2P recovery for ${peerId}`);
+      
+      // Clean up old connection state
+      this.candidateTypes.delete(peerId);
+      this.connectionQuality.delete(peerId);
+      this.iceRestartCounts.delete(peerId);
+      
+      // Close existing connection if any
+      const oldPc = this.connections.get(peerId);
+      if (oldPc) {
+        oldPc.close();
+        this.connections.delete(peerId);
+      }
+      
+      try {
+        // Try to create a new P2P connection
+        await this.createOffer(peerId);
+        
+        // Wait briefly to see if P2P establishes
+        await new Promise(r => setTimeout(r, 5000));
+        
+        const dc = this.dataChannels.get(peerId);
+        if (dc && dc.readyState === 'open') {
+          // P2P recovered!
+          this.relayMode.delete(peerId);
+          this._notifyConnectionState(peerId, 'connected', 'P2P连接已恢复');
+          console.log(`[WebRTC] P2P recovered for ${peerId}`);
+          return;
+        }
+      } catch (err) {
+        console.log(`[WebRTC] P2P recovery failed for ${peerId}: ${err.message}`);
+      }
+      
+      // Schedule next recovery attempt
+      this._scheduleP2PRecovery(peerId);
+    }, P2P_RECOVERY_INTERVAL);
+    
+    this._p2pRecoveryTimers.set(peerId, timer);
   }
 
   /**
@@ -613,23 +829,26 @@ export class WebRTCManager {
     this.pendingCandidates.get(peerId).push(candidate);
   }
 
-  // Send file
+  // Send file - automatically uses best available method
   async sendFile(peerId, file) {
+    // Try to establish connection (may result in P2P or relay)
+    await this.ensureConnection(peerId);
+    
+    // Check if we're in relay mode after connection attempt
     if (this.relayMode.get(peerId)) {
-      console.log(`[WebRTC] Using relay mode to send file to ${peerId}`);
+      console.log(`[WebRTC] Sending file to ${peerId} via relay`);
       return this.sendFileViaRelay(peerId, file);
     }
 
-    try {
-      await this.ensureConnection(peerId);
-    } catch (error) {
-      console.warn(`[WebRTC] Connection failed, falling back to relay mode: ${error.message}`);
-      this.relayMode.set(peerId, true);
-      this._notifyConnectionState(peerId, 'relay', '已切换到中继传输');
-      return this.sendFileViaRelay(peerId, file);
-    }
-
+    // Verify we have a working P2P channel
     const dc = this.dataChannels.get(peerId);
+    if (!dc || dc.readyState !== 'open') {
+      console.log(`[WebRTC] No P2P channel available, using relay for ${peerId}`);
+      this._switchToRelay(peerId, '使用中继传输');
+      return this.sendFileViaRelay(peerId, file);
+    }
+
+    console.log(`[WebRTC] Sending file to ${peerId} via P2P`);
     const fileId = crypto.randomUUID();
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
@@ -818,22 +1037,27 @@ export class WebRTCManager {
     }
   }
 
-  // Send text
+  // Send text - automatically uses best available method
   async sendText(peerId, text) {
+    // Try to establish connection (may result in P2P or relay)
+    await this.ensureConnection(peerId);
+    
+    // Check if we're in relay mode after connection attempt
     if (this.relayMode.get(peerId)) {
-      console.log(`[WebRTC] Using relay mode to send text to ${peerId}`);
+      console.log(`[WebRTC] Sending text to ${peerId} via relay`);
       return this._sendTextViaRelay(peerId, text);
     }
 
-    try {
-      await this.ensureConnection(peerId);
-      this.dataChannels.get(peerId).send(JSON.stringify({ type: 'text', content: text }));
-    } catch (error) {
-      console.warn(`[WebRTC] Connection failed for text, falling back to relay: ${error.message}`);
-      this.relayMode.set(peerId, true);
-      this._notifyConnectionState(peerId, 'relay', '已切换到中继传输');
+    // Verify we have a working P2P channel
+    const dc = this.dataChannels.get(peerId);
+    if (!dc || dc.readyState !== 'open') {
+      console.log(`[WebRTC] No P2P channel available for text, using relay for ${peerId}`);
+      this._switchToRelay(peerId, '使用中继传输');
       return this._sendTextViaRelay(peerId, text);
     }
+
+    console.log(`[WebRTC] Sending text to ${peerId} via P2P`);
+    dc.send(JSON.stringify({ type: 'text', content: text }));
   }
 
   _sendTextViaRelay(peerId, text) {
@@ -896,49 +1120,167 @@ export class WebRTCManager {
     });
   }
 
-  // Ensure full connection is established
+  /**
+   * Ensure connection is established - uses racing strategy for fast fallback
+   * This is the main entry point for establishing connections
+   */
   async ensureConnection(peerId) {
-    const channel = this.dataChannels.get(peerId);
-    const hasKey = cryptoManager.hasSharedSecret(peerId);
-    
-    if (channel && channel.readyState === 'open' && hasKey) {
+    // Already in relay mode? Skip P2P attempt
+    if (this.relayMode.get(peerId)) {
+      console.log(`[WebRTC] Already in relay mode for ${peerId}`);
       return;
     }
     
-    if (this.pendingConnections.has(peerId)) {
-      console.log(`[WebRTC] Waiting for pending connection to ${peerId}`);
-      try {
-        await this.pendingConnections.get(peerId);
-        await Promise.all([
-          this.waitForChannel(peerId),
-          this.waitForEncryptionKey(peerId)
-        ]);
-        return;
-      } catch (e) {
-        throw e;
-      }
+    const channel = this.dataChannels.get(peerId);
+    const hasKey = cryptoManager.hasSharedSecret(peerId);
+    
+    // Already have a working P2P connection?
+    if (channel && channel.readyState === 'open' && hasKey) {
+      console.log(`[WebRTC] Reusing existing P2P connection to ${peerId}`);
+      return;
     }
     
-    console.log(`[WebRTC] Starting new connection to ${peerId}`);
+    // Already establishing connection?
+    if (this.pendingConnections.has(peerId)) {
+      console.log(`[WebRTC] Waiting for pending connection to ${peerId}`);
+      return this.pendingConnections.get(peerId);
+    }
+    
+    console.log(`[WebRTC] Starting connection with racing strategy to ${peerId}`);
     this._notifyConnectionState(peerId, 'connecting', '正在建立连接...');
     
-    const slowTimer = setTimeout(() => {
-      this._notifyConnectionState(peerId, 'slow', '网络较慢，请稍候...');
-    }, SLOW_CONNECTION_THRESHOLD);
-    
-    const connectionPromise = this._establishConnection(peerId);
+    // Start racing between P2P and fast-fallback timer
+    const connectionPromise = this._raceP2PWithFallback(peerId);
     this.pendingConnections.set(peerId, connectionPromise);
     
     try {
-      await connectionPromise;
-      clearTimeout(slowTimer);
-      this._notifyConnectionState(peerId, 'connected', null);
-    } catch (error) {
-      clearTimeout(slowTimer);
-      throw error;
+      const result = await connectionPromise;
+      if (result === 'p2p') {
+        this._notifyConnectionState(peerId, 'connected', null);
+      }
+      // If result is 'relay', notification was already sent
     } finally {
       this.pendingConnections.delete(peerId);
     }
+  }
+
+  /**
+   * Race P2P connection establishment against a fast-fallback timer
+   * Returns 'p2p' if P2P succeeds, or 'relay' if fallback triggered
+   */
+  async _raceP2PWithFallback(peerId) {
+    // Initialize racing state
+    const racingState = { resolved: false, winner: null };
+    this.connectionRacing.set(peerId, racingState);
+    
+    // Create P2P connection attempt
+    const p2pPromise = this._attemptP2PConnection(peerId).then(() => {
+      if (!racingState.resolved) {
+        racingState.resolved = true;
+        racingState.winner = 'p2p';
+        console.log(`[WebRTC] P2P connection won the race for ${peerId}`);
+      }
+      return 'p2p';
+    }).catch(err => {
+      console.log(`[WebRTC] P2P attempt failed for ${peerId}: ${err.message}`);
+      throw err;
+    });
+
+    // Create fast-fallback timer
+    const fallbackPromise = new Promise((resolve) => {
+      // Show "slow connection" hint after threshold
+      const slowTimer = setTimeout(() => {
+        if (!racingState.resolved) {
+          this._notifyConnectionState(peerId, 'slow', '网络较慢，尝试备用通道...');
+        }
+      }, SLOW_CONNECTION_THRESHOLD);
+      
+      // Fast fallback timer
+      const fallbackTimer = setTimeout(() => {
+        clearTimeout(slowTimer);
+        
+        if (!racingState.resolved) {
+          // Check if we should give up on P2P based on ICE candidates
+          const shouldFallback = this._shouldFastFallback(peerId) || 
+                                 !this._hasP2PProgress(peerId);
+          
+          if (shouldFallback) {
+            console.log(`[WebRTC] Fast-fallback triggered for ${peerId}`);
+            this._switchToRelay(peerId, '已切换到中继传输，确保稳定连接');
+            resolve('relay');
+          } else {
+            // P2P seems promising, give it more time
+            console.log(`[WebRTC] P2P showing progress for ${peerId}, extending timeout`);
+          }
+        }
+      }, FAST_FALLBACK_TIMEOUT);
+      
+      // Ultimate timeout - switch to relay if P2P not established
+      const ultimateTimer = setTimeout(() => {
+        clearTimeout(slowTimer);
+        clearTimeout(fallbackTimer);
+        
+        if (!racingState.resolved) {
+          console.log(`[WebRTC] Ultimate timeout for ${peerId}, switching to relay`);
+          this._switchToRelay(peerId, '连接超时，已切换到中继传输');
+          resolve('relay');
+        }
+      }, CONNECTION_TIMEOUT);
+      
+      // Clean up timers when resolved
+      p2pPromise.then(() => {
+        clearTimeout(slowTimer);
+        clearTimeout(fallbackTimer);
+        clearTimeout(ultimateTimer);
+      }).catch(() => {
+        clearTimeout(slowTimer);
+        clearTimeout(fallbackTimer);
+        clearTimeout(ultimateTimer);
+      });
+    });
+
+    // Race: P2P success vs fallback timer
+    return Promise.race([
+      p2pPromise,
+      fallbackPromise
+    ]).finally(() => {
+      this.connectionRacing.delete(peerId);
+    });
+  }
+
+  /**
+   * Check if P2P connection is making progress (has candidates, checking state)
+   */
+  _hasP2PProgress(peerId) {
+    const pc = this.connections.get(peerId);
+    const types = this.candidateTypes.get(peerId);
+    
+    // Has gathered some non-relay candidates?
+    const hasP2PCandidates = types && (types.has('host') || types.has('srflx'));
+    
+    // ICE is in a good state?
+    const iceGood = pc && ['new', 'checking', 'connected', 'completed'].includes(pc.iceConnectionState);
+    
+    return hasP2PCandidates && iceGood;
+  }
+
+  /**
+   * Attempt P2P connection
+   */
+  async _attemptP2PConnection(peerId) {
+    const channel = this.dataChannels.get(peerId);
+    
+    if (!channel || channel.readyState === 'closed') {
+      await this.createOffer(peerId);
+    }
+    
+    // Wait for channel and key with timeout
+    await Promise.all([
+      this.waitForChannel(peerId, CONNECTION_TIMEOUT),
+      this.waitForEncryptionKey(peerId, CONNECTION_TIMEOUT)
+    ]);
+    
+    console.log(`[WebRTC] P2P connection established with ${peerId}`);
   }
 
   _notifyConnectionState(peerId, status, message) {
@@ -947,27 +1289,18 @@ export class WebRTCManager {
     }
   }
 
-  async _establishConnection(peerId) {
-    const channel = this.dataChannels.get(peerId);
-    
-    if (!channel || channel.readyState === 'closed') {
-      await this.createOffer(peerId);
-    }
-    
-    await Promise.all([
-      this.waitForChannel(peerId),
-      this.waitForEncryptionKey(peerId)
-    ]);
-    
-    console.log(`[WebRTC] Connection established with ${peerId}`);
-  }
-
-  // Close connection
+  // Close connection and cleanup all state
   closeConnection(peerId) {
     // Clear timers
     if (this.disconnectedTimers.has(peerId)) {
       clearTimeout(this.disconnectedTimers.get(peerId));
       this.disconnectedTimers.delete(peerId);
+    }
+    
+    // Clear P2P recovery timer
+    if (this._p2pRecoveryTimers?.has(peerId)) {
+      clearTimeout(this._p2pRecoveryTimers.get(peerId));
+      this._p2pRecoveryTimers.delete(peerId);
     }
     
     this.dataChannels.get(peerId)?.close();
@@ -979,6 +1312,14 @@ export class WebRTCManager {
     this.iceRestartCounts.delete(peerId);
     this.makingOffer.delete(peerId);
     this.ignoreOffer.delete(peerId);
+    
+    // Clean up new tracking state
+    this.candidateTypes.delete(peerId);
+    this.connectionQuality.delete(peerId);
+    this.connectionRacing.delete(peerId);
+    this.relayMode.delete(peerId);
+    this.knownPeers?.delete(peerId);
+    
     cryptoManager.removePeer(peerId);
   }
 

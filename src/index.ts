@@ -50,8 +50,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   const explicitRoom = url.searchParams.get('room');
   
   let roomId: string;
+  let roomCode: string; // User-friendly room code to display
+  
   if (explicitRoom && /^[a-zA-Z0-9]{4,16}$/.test(explicitRoom)) {
     // Use explicit room code (4-16 alphanumeric characters)
+    roomCode = explicitRoom.toUpperCase();
     roomId = `custom-${explicitRoom.toLowerCase()}`;
   } else {
     // Fall back to IP-based room assignment
@@ -59,18 +62,23 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
                      request.headers.get('X-Forwarded-For')?.split(',')[0] || 
                      'default';
     roomId = await generateRoomId(clientIP);
+    // For auto-assigned rooms, use first 6 chars of hash as display code
+    roomCode = roomId.substring(0, 6).toUpperCase();
   }
 
   // Get or create the room Durable Object
   const roomObjectId = env.ROOM.idFromName(roomId);
   const roomStub = env.ROOM.get(roomObjectId);
 
-  // Forward the WebSocket request to the room
+  // Forward the WebSocket request to the room with room info
   const wsUrl = new URL(request.url);
   wsUrl.pathname = '/ws';
+  // Pass room code via header so Room can include it in join response
+  const headers = new Headers(request.headers);
+  headers.set('X-Room-Code', roomCode);
 
   return roomStub.fetch(new Request(wsUrl.toString(), {
-    headers: request.headers,
+    headers,
     method: request.method,
   }));
 }

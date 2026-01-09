@@ -62,12 +62,16 @@ export class Room {
       return new Response('Expected WebSocket', { status: 426 });
     }
 
+    // Get room code from header (passed by index.ts)
+    const roomCode = request.headers.get('X-Room-Code') || '';
+
     // Create WebSocket pair
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
 
     // Accept the WebSocket with hibernation API
-    this.state.acceptWebSocket(server);
+    // Use tag to store room code (survives hibernation)
+    this.state.acceptWebSocket(server, [roomCode]);
 
     return new Response(null, {
       status: 101,
@@ -153,6 +157,10 @@ export class Room {
     const joinData = msg.data as { name: string; deviceType: 'desktop' | 'mobile' | 'tablet'; browserInfo?: string };
     const peerId = crypto.randomUUID();
 
+    // Get room code from WebSocket tag
+    const tags = this.state.getTags(ws);
+    const roomCode = tags.length > 0 ? tags[0] : '';
+
     // Create peer attachment data
     const attachment: PeerAttachment = {
       id: peerId,
@@ -173,10 +181,11 @@ export class Room {
       .filter(([id]) => id !== peerId)
       .map(([id, { attachment: p }]) => ({ id, name: p.name, deviceType: p.deviceType, browserInfo: p.browserInfo }));
 
-    // Send peer their ID and list of other peers
+    // Send peer their ID, room code, and list of other peers
     ws.send(JSON.stringify({
       type: 'joined',
       peerId,
+      roomCode,
       peers: otherPeers,
     }));
 
