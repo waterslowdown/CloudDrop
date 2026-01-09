@@ -16,7 +16,7 @@ interface Peer {
 }
 
 interface SignalingMessage {
-  type: 'join' | 'leave' | 'offer' | 'answer' | 'ice-candidate' | 'peers' | 'text' | 'peer-joined' | 'peer-left' | 'relay-data' | 'name-changed';
+  type: 'join' | 'leave' | 'offer' | 'answer' | 'ice-candidate' | 'peers' | 'text' | 'peer-joined' | 'peer-left' | 'relay-data' | 'name-changed' | 'key-exchange';
   from?: string;
   to?: string;
   data?: unknown;
@@ -126,6 +126,9 @@ export class Room {
           break;
         case 'relay-data':
           await this.handleRelayData(ws, msg);
+          break;
+        case 'key-exchange':
+          await this.handleKeyExchange(ws, msg);
           break;
         case 'name-changed':
           await this.handleNameChanged(ws, msg);
@@ -270,6 +273,27 @@ export class Room {
     if (targetPeer && targetPeer.ws.readyState === WebSocket.OPEN) {
       targetPeer.ws.send(JSON.stringify({
         type: 'relay-data',
+        from: fromPeerId,
+        data: msg.data,
+      }));
+    }
+  }
+
+  /**
+   * Handle key exchange messages (for relay mode encryption)
+   */
+  private async handleKeyExchange(ws: WebSocket, msg: SignalingMessage): Promise<void> {
+    if (!msg.to) return;
+
+    const fromPeerId = this.getPeerIdFromWs(ws);
+    if (!fromPeerId) return;
+
+    const activePeers = this.getActivePeers();
+    const targetPeer = activePeers.get(msg.to);
+    
+    if (targetPeer && targetPeer.ws.readyState === WebSocket.OPEN) {
+      targetPeer.ws.send(JSON.stringify({
+        type: 'key-exchange',
         from: fromPeerId,
         data: msg.data,
       }));

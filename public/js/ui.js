@@ -322,7 +322,18 @@ export function showToast(message, type = 'info', duration = 3000) {
 // Connection status
 export function updateConnectionStatus(status, text) {
   const el = document.getElementById('connectionStatus');
-  if (el) { el.className = `connection-status ${status}`; el.querySelector('.status-text').textContent = text; }
+  if (el) {
+    el.className = `connection-status ${status}`;
+    el.querySelector('.status-text').textContent = text;
+    
+    // 设置 hover 提示，说明是否已连接到主服务器
+    const tooltips = {
+      connected: '已连接到主服务器',
+      disconnected: '与主服务器断开连接',
+      connecting: '正在连接主服务器...'
+    };
+    el.title = tooltips[status] || '主服务器连接状态';
+  }
 }
 
 // Drop zone

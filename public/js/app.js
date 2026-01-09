@@ -220,6 +220,9 @@ class CloudDrop {
       case 'relay-data':
         this.webrtc.handleRelayData(msg.from, msg.data);
         break;
+      case 'key-exchange':
+        this.webrtc.handleKeyExchange(msg.from, msg.data);
+        break;
       case 'name-changed':
         this.handleNameChanged(msg.from, msg.data.name);
         break;
