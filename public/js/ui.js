@@ -124,7 +124,8 @@ export function generateDisplayName() {
 export const connectionModeIcons = {
   p2p: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="M9 12h6"/></svg>`,
   relay: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><path d="M7 12h2M15 12h2M12 8v2"/></svg>`,
-  connecting: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="12"/></svg>`
+  connecting: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="12"/></svg>`,
+  waiting: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>`
 };
 
 // File type icons
@@ -475,6 +476,11 @@ export function setupModalCloseHandlers() {
 
 // Transfer progress
 export function updateTransferProgress({ fileName, fileSize, percent, speed, mode }) {
+  // Remove waiting state classes when actual transfer starts
+  document.querySelector('.transfer-info')?.classList.remove('waiting');
+  document.querySelector('.progress-container')?.classList.remove('waiting');
+  document.querySelector('.transfer-stats')?.classList.remove('waiting');
+
   if (fileName !== undefined) document.getElementById('transferFileName').textContent = fileName;
   if (fileSize !== undefined) document.getElementById('transferFileSize').textContent = formatFileSize(fileSize);
   if (percent !== undefined) {
@@ -482,7 +488,7 @@ export function updateTransferProgress({ fileName, fileSize, percent, speed, mod
     document.getElementById('transferPercent').textContent = `${Math.round(percent)}%`;
   }
   if (speed !== undefined) document.getElementById('transferSpeed').textContent = formatSpeed(speed);
-  
+
   // Update transfer mode indicator
   if (mode !== undefined) {
     updateTransferModeIndicator(mode);
@@ -491,20 +497,24 @@ export function updateTransferProgress({ fileName, fileSize, percent, speed, mod
 
 /**
  * Update transfer mode indicator in transfer modal
- * @param {'p2p'|'relay'} mode - Transfer mode
+ * @param {'p2p'|'relay'|'waiting'} mode - Transfer mode
  */
 export function updateTransferModeIndicator(mode) {
   const indicator = document.getElementById('transferModeIndicator');
   if (!indicator) return;
-  
+
   indicator.dataset.mode = mode;
   const modeIcon = indicator.querySelector('.transfer-mode-icon');
   const modeText = indicator.querySelector('.transfer-mode-text');
-  
+
   if (mode === 'p2p') {
     modeIcon.innerHTML = connectionModeIcons.p2p;
     modeText.textContent = 'P2P 直连';
     indicator.title = '点对点直连传输，速度快，隐私性最好';
+  } else if (mode === 'waiting') {
+    modeIcon.innerHTML = connectionModeIcons.waiting;
+    modeText.textContent = '等待对方确认';
+    indicator.title = '等待对方确认接收文件';
   } else {
     modeIcon.innerHTML = connectionModeIcons.relay;
     modeText.textContent = '中继传输';

@@ -648,6 +648,24 @@ body::before {
   margin-bottom: var(--space-md);
 }
 
+/* Waiting state - vertical layout */
+.transfer-info.waiting {
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-xs);
+  text-align: center;
+}
+
+.transfer-info.waiting .file-name {
+  max-width: 100%;
+  font-size: 1rem;
+}
+
+.transfer-info.waiting .file-size {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
 .file-name {
   font-weight: 500;
   color: var(--text-primary);
@@ -678,12 +696,33 @@ body::before {
   transition: width var(--transition-fast);
 }
 
+/* Waiting animation - indeterminate progress */
+.progress-container.waiting .progress-bar {
+  width: 30%;
+  animation: waiting-progress 1.5s ease-in-out infinite;
+}
+
+@keyframes waiting-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
 .transfer-stats {
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-size: var(--font-size-sm);
   color: var(--text-muted);
+}
+
+/* Waiting state - center single element */
+.transfer-stats.waiting {
+  justify-content: center;
+}
+
+.transfer-stats.waiting #transferPercent,
+.transfer-stats.waiting #transferSpeed {
+  display: none;
 }
 
 /* Transfer Cancel Button */
@@ -1226,9 +1265,22 @@ body::before {
   height: 14px;
 }
 
-/* Settings button in header */
-.settings-btn {
+/* GitHub link in header */
+.github-link {
   margin-left: var(--space-md);
+  text-decoration: none;
+  color: var(--text-secondary);
+  transition: color var(--transition-fast), transform var(--transition-fast);
+}
+
+.github-link:hover {
+  color: var(--text-primary);
+  transform: scale(1.1);
+}
+
+.github-link svg {
+  width: 20px;
+  height: 20px;
 }
 
 /* Generic Confirm Dialog */
@@ -1491,6 +1543,34 @@ body::before {
 .btn-icon svg {
   width: 14px;
   height: 14px;
+}
+
+/* Small icon button */
+.btn-icon-sm {
+  width: 20px;
+  height: 20px;
+}
+
+.btn-icon-sm svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Clickable room code */
+.room-code {
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.room-code:hover {
+  background: var(--bg-glass-hover);
+  color: var(--accent-primary);
+}
+
+.room-code:active {
+  transform: scale(0.98);
 }
 
 .btn-sm {

@@ -23,6 +23,11 @@ const ICE_RESTART_DELAY = 500; // Fast restart
 const MAX_ICE_RESTARTS = 2; // Allow 2 ICE restarts before switching to relay
 const DISCONNECTED_TIMEOUT = 3000; // 3 seconds before switching to relay
 
+// Background P2P retry configuration
+const P2P_RETRY_INITIAL_DELAY = 10000; // 10 seconds before first retry
+const P2P_RETRY_INTERVAL = 30000; // Retry every 30 seconds
+const P2P_RETRY_MAX_ATTEMPTS = 10; // Max retry attempts before giving up
+
 // Minimal fallback (only used if server is unreachable)
 const FALLBACK_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' }
@@ -258,6 +263,10 @@ export class WebRTCManager {
     // Track peers for prewarming
     this.knownPeers = new Set();
     this.prewarmEnabled = true;
+
+    // Background P2P retry tracking
+    this.p2pRetryTimers = new Map(); // peerId -> timeout id
+    this.p2pRetryAttempts = new Map(); // peerId -> number
   }
 
   /**
@@ -539,7 +548,7 @@ export class WebRTCManager {
    */
   _switchToRelay(peerId, message, silent = false) {
     const wasAlreadyRelay = this.relayMode.get(peerId);
-    
+
     if (!wasAlreadyRelay) {
       this.relayMode.set(peerId, true);
       // Always update the badge, but only show toast if not silent
@@ -553,9 +562,117 @@ export class WebRTCManager {
         racing.resolved = true;
         racing.winner = 'relay';
       }
+
+      // Start background P2P retry
+      this._startBackgroundP2PRetry(peerId);
     } else {
       // Already in relay mode - just log, no notification
       console.log(`[WebRTC] Already in relay mode for ${peerId}, skipping notification`);
+    }
+  }
+
+  /**
+   * Start background P2P retry timer
+   * Periodically attempts to re-establish P2P connection while in relay mode
+   */
+  _startBackgroundP2PRetry(peerId) {
+    // Clear any existing timer
+    this._stopBackgroundP2PRetry(peerId);
+
+    // Reset attempt counter
+    this.p2pRetryAttempts.set(peerId, 0);
+
+    // Start first retry after initial delay
+    const timerId = setTimeout(() => {
+      this._attemptSilentP2PReconnect(peerId);
+    }, P2P_RETRY_INITIAL_DELAY);
+
+    this.p2pRetryTimers.set(peerId, timerId);
+    console.log(`[WebRTC] Started background P2P retry for ${peerId}`);
+  }
+
+  /**
+   * Stop background P2P retry timer
+   */
+  _stopBackgroundP2PRetry(peerId) {
+    const timerId = this.p2pRetryTimers.get(peerId);
+    if (timerId) {
+      clearTimeout(timerId);
+      this.p2pRetryTimers.delete(peerId);
+    }
+    this.p2pRetryAttempts.delete(peerId);
+  }
+
+  /**
+   * Attempt silent P2P reconnection in background
+   * If successful, switch back to P2P mode
+   * If failed, schedule another retry
+   */
+  async _attemptSilentP2PReconnect(peerId) {
+    // Check if still in relay mode (peer might have left or P2P already restored)
+    if (!this.relayMode.get(peerId)) {
+      console.log(`[WebRTC] P2P retry cancelled for ${peerId} - no longer in relay mode`);
+      this._stopBackgroundP2PRetry(peerId);
+      return;
+    }
+
+    const attempts = (this.p2pRetryAttempts.get(peerId) || 0) + 1;
+    this.p2pRetryAttempts.set(peerId, attempts);
+
+    // Check if exceeded max attempts
+    if (attempts > P2P_RETRY_MAX_ATTEMPTS) {
+      console.log(`[WebRTC] P2P retry max attempts (${P2P_RETRY_MAX_ATTEMPTS}) reached for ${peerId}`);
+      this._stopBackgroundP2PRetry(peerId);
+      return;
+    }
+
+    console.log(`[WebRTC] Attempting silent P2P reconnect for ${peerId} (attempt ${attempts}/${P2P_RETRY_MAX_ATTEMPTS})`);
+
+    try {
+      // Close existing connection if any
+      const existingPc = this.connections.get(peerId);
+      if (existingPc) {
+        existingPc.close();
+        this.connections.delete(peerId);
+      }
+
+      const existingDc = this.dataChannels.get(peerId);
+      if (existingDc) {
+        existingDc.close();
+        this.dataChannels.delete(peerId);
+      }
+
+      // Clear related state for fresh attempt
+      this.pendingCandidates.delete(peerId);
+      this.iceRestartCounts.delete(peerId);
+      this.candidateTypes.delete(peerId);
+      this.connectionQuality.delete(peerId);
+
+      // Attempt P2P connection silently
+      await this._attemptP2PConnectionSilent(peerId);
+
+      // If we get here, P2P succeeded!
+      console.log(`[WebRTC] Background P2P reconnect succeeded for ${peerId}`);
+
+      // Switch back to P2P mode
+      this.relayMode.delete(peerId);
+      this._stopBackgroundP2PRetry(peerId);
+
+      // Notify UI silently (update badge without toast)
+      this._notifyConnectionState(peerId, 'connected', null);
+
+    } catch (err) {
+      console.log(`[WebRTC] Background P2P retry failed for ${peerId}: ${err.message}`);
+
+      // Schedule next retry if still in relay mode
+      if (this.relayMode.get(peerId)) {
+        const timerId = setTimeout(() => {
+          this._attemptSilentP2PReconnect(peerId);
+        }, P2P_RETRY_INTERVAL);
+
+        this.p2pRetryTimers.set(peerId, timerId);
+        console.log(`[WebRTC] Next P2P retry scheduled in ${P2P_RETRY_INTERVAL / 1000}s`);
+      }
     }
   }
 
@@ -639,17 +756,19 @@ export class WebRTCManager {
       console.log(`[WebRTC] DataChannel opened with ${peerId}`);
       // Reset relay mode when direct channel opens
       this.relayMode.delete(peerId);
+      // Stop any background P2P retry since we're now connected
+      this._stopBackgroundP2PRetry(peerId);
       // Notify UI that P2P connection is established (for both sender and receiver)
       this._notifyConnectionState(peerId, 'connected', null);
     };
-    
+
     channel.onmessage = (e) => this.handleMessage(peerId, e.data);
-    
+
     channel.onclose = () => {
       console.log(`[WebRTC] DataChannel closed with ${peerId}`);
       this.dataChannels.delete(peerId);
     };
-    
+
     channel.onerror = (e) => console.error('[WebRTC] DataChannel error:', e);
   }
 
@@ -1727,7 +1846,10 @@ export class WebRTCManager {
       clearTimeout(this.disconnectedTimers.get(peerId));
       this.disconnectedTimers.delete(peerId);
     }
-    
+
+    // Stop background P2P retry
+    this._stopBackgroundP2PRetry(peerId);
+
     this.dataChannels.get(peerId)?.close();
     this.connections.get(peerId)?.close();
     this.dataChannels.delete(peerId);
@@ -1737,14 +1859,14 @@ export class WebRTCManager {
     this.iceRestartCounts.delete(peerId);
     this.makingOffer.delete(peerId);
     this.ignoreOffer.delete(peerId);
-    
+
     // Clean up new tracking state
     this.candidateTypes.delete(peerId);
     this.connectionQuality.delete(peerId);
     this.connectionRacing.delete(peerId);
     this.relayMode.delete(peerId);
     this.knownPeers?.delete(peerId);
-    
+
     cryptoManager.removePeer(peerId);
   }
 

@@ -58,7 +58,7 @@ class CloudDrop {
    */
   saveTrustedDevices() {
     try {
-      localStorage.setItem('clouddrop_trusted_devices', 
+      localStorage.setItem('clouddrop_trusted_devices',
         JSON.stringify(Array.from(this.trustedDevices.entries())));
     } catch (e) {
       console.warn('Failed to save trusted devices:', e);
@@ -121,21 +121,21 @@ class CloudDrop {
   updateTrustedBadge(peerId, trusted) {
     const card = document.querySelector(`[data-peer-id="${peerId}"]`);
     if (!card) return;
-    
+
     const existingBadge = card.querySelector('.peer-trusted-badge');
-    
+
     if (trusted && !existingBadge) {
       const badge = document.createElement('div');
       badge.className = 'peer-trusted-badge';
       badge.title = '点击取消信任';
       badge.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>`;
-      
+
       // Click to untrust
       badge.addEventListener('click', async (e) => {
         e.stopPropagation();
         const peer = this.peers.get(peerId);
         if (!peer) return;
-        
+
         const confirmed = await ui.showConfirmDialog({
           title: '取消信任设备',
           message: `确定要取消信任「<strong>${ui.escapeHtml(peer.name)}</strong>」吗？<br><br><span style="color: var(--text-muted)">取消后，该设备发送文件时需要您手动确认。</span>`,
@@ -143,13 +143,13 @@ class CloudDrop {
           cancelText: '保留信任',
           type: 'warning'
         });
-        
+
         if (confirmed) {
           this.untrustDevice(peer);
           ui.showToast(`已取消信任: ${peer.name}`, 'info');
         }
       });
-      
+
       card.appendChild(badge);
     } else if (!trusted && existingBadge) {
       existingBadge.remove();
@@ -173,14 +173,14 @@ class CloudDrop {
     const info = this.trustedDevices.get(fingerprint);
     this.trustedDevices.delete(fingerprint);
     this.saveTrustedDevices();
-    
+
     // Update any matching peer cards
     for (const [peerId, peer] of this.peers.entries()) {
       if (this.getDeviceFingerprint(peer) === fingerprint) {
         this.updateTrustedBadge(peerId, false);
       }
     }
-    
+
     return info;
   }
 
@@ -463,7 +463,7 @@ class CloudDrop {
 
     this.ws.onerror = (event) => {
       console.error('[WebSocket] Error:', event);
-      ui.updateConnectionStatus('disconnected', '连接错误');
+      ui.updateConnectionStatus('disconnected', '已断开');
     };
 
     this.webrtc = new WebRTCManager({
@@ -472,17 +472,17 @@ class CloudDrop {
 
     this.webrtc.onProgress = (p) => {
       const isRelayMode = this.webrtc.relayMode.get(p.peerId) || false;
-      
+
       // Update modal title to show actual transfer (in case it was "waiting for confirmation")
       const modalTitle = document.getElementById('modalTitle');
       if (modalTitle && modalTitle.textContent === '等待确认') {
         modalTitle.textContent = '正在发送';
       }
-      
+
       ui.updateTransferProgress({
-        fileName: p.fileName, 
-        fileSize: p.fileSize, 
-        percent: p.percent, 
+        fileName: p.fileName,
+        fileSize: p.fileSize,
+        percent: p.percent,
         speed: p.speed,
         mode: isRelayMode ? 'relay' : 'p2p'
       });
@@ -511,19 +511,19 @@ class CloudDrop {
 
     this.webrtc.onTextReceived = (peerId, text) => {
       this.saveMessage(peerId, { type: 'received', text, timestamp: Date.now() });
-      
+
       // If chat panel is open for this peer, update UI immediately
       if (this.currentChatPeer && this.currentChatPeer.id === peerId) {
         this.renderChatHistory(peerId);
         // Play a subtle sound? (Optional)
-        return; 
+        return;
       }
-      
+
       // Update unread count
       const currentUnread = this.unreadMessages.get(peerId) || 0;
       this.unreadMessages.set(peerId, currentUnread + 1);
       this.updateUnreadBadge(peerId);
-      
+
       // Show toast notification
       const peer = this.peers.get(peerId);
       ui.showToast(`${peer?.name || '未知设备'}: ${text.substring(0, 30)}${text.length > 30 ? '...' : ''}`, 'info');
@@ -538,20 +538,20 @@ class CloudDrop {
     this.webrtc.onTransferCancelled = (peerId, fileId, reason) => {
       const peer = this.peers.get(peerId);
       ui.hideModal('transferModal');
-      
+
       if (reason === 'user') {
         ui.showToast(`${peer?.name || '对方'} 取消了传输`, 'warning');
       } else {
         ui.showToast('传输已取消', 'info');
       }
-      
+
       this.currentTransfer = null;
     };
 
     // Connection state change handler
     this.webrtc.onConnectionStateChange = ({ peerId, status, message }) => {
       const toastId = `connection-${peerId}`;
-      
+
       switch (status) {
         case 'connecting':
           // Only show toast if message is provided (user-initiated action)
@@ -652,10 +652,10 @@ class CloudDrop {
   handleFileRequest(peerId, data) {
     const peer = this.peers.get(peerId);
     const isRelayMode = data.transferMode === 'relay';
-    
+
     // Store pending request info
     this.pendingFileRequest = { peerId, fileId: data.fileId, data };
-    
+
     // Check if this device is trusted - auto-accept if so
     if (peer && this.isDeviceTrusted(peer)) {
       console.log(`[App] Auto-accepting file from trusted device: ${peer.name}`);
@@ -663,7 +663,7 @@ class CloudDrop {
       this.acceptFileRequest();
       return;
     }
-    
+
     // Update the receive modal with detailed info
     ui.updateReceiveModal({
       senderName: peer?.name || '未知设备',
@@ -673,10 +673,10 @@ class CloudDrop {
       fileSize: data.size,
       mode: isRelayMode ? 'relay' : 'p2p'
     });
-    
+
     // Trigger notification (vibration)
     ui.triggerNotification('file');
-    
+
     // Show the confirmation modal
     ui.showModal('receiveModal');
   }
@@ -686,12 +686,12 @@ class CloudDrop {
    */
   acceptFileRequest() {
     if (!this.pendingFileRequest) return;
-    
+
     const { peerId, fileId, data } = this.pendingFileRequest;
-    
+
     // Send acceptance
     this.webrtc.respondToFileRequest(peerId, fileId, true);
-    
+
     // Save current transfer state for cancellation
     this.currentTransfer = {
       peerId,
@@ -699,12 +699,12 @@ class CloudDrop {
       fileName: data.name,
       direction: 'receive'
     };
-    
+
     // Hide confirmation, show receiving progress
     ui.hideModal('receiveModal');
     const isRelayMode = data.transferMode === 'relay';
     ui.showReceivingModal(data.name, data.size, isRelayMode ? 'relay' : 'p2p');
-    
+
     // Initialize transfer state for receiving
     this.webrtc.incomingTransfers.set(peerId, {
       fileId: fileId,
@@ -716,7 +716,7 @@ class CloudDrop {
       startTime: Date.now(),
       confirmed: true
     });
-    
+
     this.pendingFileRequest = null;
   }
 
@@ -725,15 +725,15 @@ class CloudDrop {
    */
   declineFileRequest() {
     if (!this.pendingFileRequest) return;
-    
+
     const { peerId, fileId } = this.pendingFileRequest;
-    
+
     // Send decline
     this.webrtc.respondToFileRequest(peerId, fileId, false);
-    
+
     ui.hideModal('receiveModal');
     ui.showToast('已拒绝文件接收', 'info');
-    
+
     this.pendingFileRequest = null;
   }
 
@@ -742,15 +742,15 @@ class CloudDrop {
    */
   acceptAndTrustDevice() {
     if (!this.pendingFileRequest) return;
-    
+
     const { peerId } = this.pendingFileRequest;
     const peer = this.peers.get(peerId);
-    
+
     // Trust the device first
     if (peer) {
       this.trustDevice(peer);
     }
-    
+
     // Then accept the file
     this.acceptFileRequest();
   }
@@ -763,34 +763,34 @@ class CloudDrop {
       ui.hideModal('transferModal');
       return;
     }
-    
+
     const { peerId, fileId, fileName, direction } = this.currentTransfer;
-    
+
     // Cancel the transfer via WebRTC
     this.webrtc.cancelTransfer(fileId, peerId, 'user');
-    
+
     // Hide modal and show feedback
     ui.hideModal('transferModal');
-    
+
     if (direction === 'send') {
       ui.showToast(`已取消发送: ${fileName}`, 'info');
     } else {
       ui.showToast(`已取消接收: ${fileName}`, 'info');
     }
-    
+
     this.currentTransfer = null;
   }
 
   addPeer(peer) {
     this.peers.set(peer.id, peer);
     ui.addPeerToGrid(peer, document.getElementById('peersGrid'), (p, e) => this.onPeerClick(p, e));
-    
+
     // Check if this device is trusted and show badge
     if (this.isDeviceTrusted(peer)) {
       // Small delay to ensure DOM is ready
       setTimeout(() => this.updateTrustedBadge(peer.id, true), 50);
     }
-    
+
     // Prewarm WebRTC connection for faster first transfer
     if (this.webrtc) {
       this.webrtc.prewarmConnection(peer.id);
@@ -813,7 +813,7 @@ class CloudDrop {
     this.deviceName = newName;
     localStorage.setItem('clouddrop_device_name', newName);
     this.updateDeviceNameDisplay();
-    
+
     // Broadcast name change to all peers
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
@@ -821,7 +821,7 @@ class CloudDrop {
         data: { name: newName }
       }));
     }
-    
+
     ui.showToast('设备名称已更新', 'success');
   }
 
@@ -830,14 +830,14 @@ class CloudDrop {
     if (peer) {
       const oldName = peer.name;
       peer.name = newName;
-      
+
       // Update the peer card
       const card = document.querySelector(`[data-peer-id="${peerId}"]`);
       if (card) {
         const nameEl = card.querySelector('.peer-name');
         if (nameEl) nameEl.textContent = newName;
       }
-      
+
       ui.showToast(`${oldName} 改名为 ${newName}`, 'info');
     }
   }
@@ -864,13 +864,13 @@ class CloudDrop {
     for (const file of files) {
       // Show waiting for confirmation
       this.showWaitingForConfirmation(peer?.name || '对方', file.name);
-      
+
       try {
         // sendFile now handles the request/confirm flow internally
         // It will throw if declined, timeout, or cancelled
         // onTransferStart callback will set this.currentTransfer
         await this.webrtc.sendFile(peerId, file);
-        
+
         ui.hideModal('transferModal');
         ui.showToast(`已发送: ${file.name}`, 'success');
       } catch (e) {
@@ -898,16 +898,16 @@ class CloudDrop {
     document.getElementById('transferFileName').textContent = fileName;
     document.getElementById('transferFileSize').textContent = `等待 ${peerName} 确认接收...`;
     document.getElementById('transferProgress').style.width = '0%';
-    document.getElementById('transferPercent').textContent = '等待中';
+    document.getElementById('transferPercent').textContent = '';
     document.getElementById('transferSpeed').textContent = '';
 
-    // Update mode indicator to show connecting
-    const indicator = document.getElementById('transferModeIndicator');
-    if (indicator) {
-      indicator.dataset.mode = 'p2p';
-      const modeText = indicator.querySelector('.transfer-mode-text');
-      if (modeText) modeText.textContent = '等待确认';
-    }
+    // Add waiting state classes for special styling
+    document.querySelector('.transfer-info')?.classList.add('waiting');
+    document.querySelector('.progress-container')?.classList.add('waiting');
+    document.querySelector('.transfer-stats')?.classList.add('waiting');
+
+    // Update mode indicator to show waiting (with icon)
+    ui.updateTransferModeIndicator('waiting');
 
     ui.showModal('transferModal');
   }
@@ -1008,7 +1008,7 @@ class CloudDrop {
 
   async sendTextMessage(peerId, text) {
     if (!text.trim()) return;
-    
+
     try {
       await this.webrtc.sendText(peerId, text);
       this.saveMessage(peerId, { type: 'sent', text, timestamp: Date.now() });
@@ -1025,7 +1025,7 @@ class CloudDrop {
     this.renderChatHistory(peer.id);
     document.getElementById('chatPanel').classList.add('active');
     document.getElementById('chatInput').focus();
-    
+
     // Clear unread messages
     this.unreadMessages.set(peer.id, 0);
     this.updateUnreadBadge(peer.id);
@@ -1040,7 +1040,7 @@ class CloudDrop {
     const messages = this.getMessageHistory(peerId);
     const container = document.getElementById('chatMessages');
     container.innerHTML = '';
-    
+
     if (messages.length === 0) {
       // Empty state
       const emptyEl = document.createElement('div');
@@ -1053,18 +1053,18 @@ class CloudDrop {
       container.appendChild(emptyEl);
       return;
     }
-    
+
     messages.forEach((msg, index) => {
       const msgEl = document.createElement('div');
       let statusClass = msg.type;
       if (msg.sending) statusClass += ' sending';
       if (msg.failed) statusClass += ' failed';
       msgEl.className = `chat-message ${statusClass}`;
-      
+
       let statusText = this.formatTime(msg.timestamp);
       if (msg.sending) statusText = '发送中...';
       if (msg.failed) statusText = '发送失败 · 点击重试';
-      
+
       msgEl.innerHTML = `
         <div class="chat-bubble-wrapper">
           <div class="chat-bubble">${ui.escapeHtml(msg.text)}</div>
@@ -1077,23 +1077,23 @@ class CloudDrop {
         </div>
         <div class="chat-time">${statusText}</div>
       `;
-      
+
       // Add copy button functionality
       const copyBtn = msgEl.querySelector('.chat-copy-btn');
       copyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         this.copyMessageText(msg.text, copyBtn);
       });
-      
+
       // Add click event for retry on failed messages
       if (msg.failed) {
         msgEl.style.cursor = 'pointer';
         msgEl.addEventListener('click', () => this.retryMessage(peerId, index));
       }
-      
+
       container.appendChild(msgEl);
     });
-    
+
     // Scroll to bottom
     container.scrollTop = container.scrollHeight;
   }
@@ -1102,13 +1102,13 @@ class CloudDrop {
     const now = Date.now();
     const diff = now - timestamp;
     const minutes = Math.floor(diff / 60000);
-    
+
     if (minutes < 1) return '刚刚';
     if (minutes < 60) return `${minutes}分钟前`;
-    
+
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return `${hours}小时前`;
-    
+
     const date = new Date(timestamp);
     return `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
   }
@@ -1132,15 +1132,15 @@ class CloudDrop {
   async retryMessage(peerId, messageIndex) {
     const messages = this.getMessageHistory(peerId);
     const msg = messages[messageIndex];
-    
+
     if (!msg || !msg.failed) return;
-    
+
     // Reset status to sending
     msg.failed = false;
     msg.sending = true;
     msg.timestamp = Date.now();
     this.renderChatHistory(peerId);
-    
+
     try {
       await this.webrtc.sendText(peerId, msg.text);
       // Mark as sent
@@ -1159,14 +1159,14 @@ class CloudDrop {
     const count = this.unreadMessages.get(peerId) || 0;
     const card = document.querySelector(`[data-peer-id="${peerId}"]`);
     if (!card) return;
-    
+
     const button = card.querySelector('[data-action="message"]');
     if (!button) return;
-    
+
     // Remove existing badge
     const existingBadge = button.querySelector('.unread-badge');
     if (existingBadge) existingBadge.remove();
-    
+
     // Add new badge if count > 0
     if (count > 0) {
       const badge = document.createElement('span');
@@ -1215,7 +1215,7 @@ class CloudDrop {
 
     // Mobile bottom navigation
     this.setupMobileNavigation();
-    
+
     // Empty state actions
     this.setupEmptyStateActions();
 
@@ -1240,6 +1240,20 @@ class CloudDrop {
 
     document.getElementById('editNameModalClose')?.addEventListener('click', () => {
       ui.hideModal('editNameModal');
+    });
+
+    // Refresh room button - generate new room code
+    document.getElementById('refreshRoomBtn')?.addEventListener('click', async () => {
+      // Generate new room code
+      const newRoomCode = this.generateRoomCode();
+
+      // Clear room password since it's a new room
+      this.clearRoomPassword();
+
+      // Switch to new room
+      this.switchRoom(newRoomCode);
+      this.triggerHaptic('medium');
+      ui.showToast(`已切换到新房间: ${newRoomCode}`, 'success');
     });
 
     // Join room button
@@ -1382,7 +1396,7 @@ class CloudDrop {
         ui.hideModal('transferModal');
       }
     });
-    
+
     // Cancel transfer button
     document.getElementById('cancelTransfer')?.addEventListener('click', () => {
       this.triggerHaptic('medium');
@@ -1402,11 +1416,6 @@ class CloudDrop {
     document.getElementById('receiveAlwaysAccept')?.addEventListener('click', () => {
       this.triggerHaptic('medium');
       this.acceptAndTrustDevice();
-    });
-    
-    // Desktop settings button
-    document.getElementById('headerSettingsBtn')?.addEventListener('click', () => {
-      this.showMobileSettings();
     });
 
     // Text modal
@@ -1445,25 +1454,25 @@ class CloudDrop {
 
     // Chat panel events
     document.getElementById('closeChatPanel')?.addEventListener('click', () => this.closeChatPanel());
-    
+
     document.getElementById('sendChatMessage')?.addEventListener('click', async () => {
       if (!this.currentChatPeer) return;
       const input = document.getElementById('chatInput');
       const btn = document.getElementById('sendChatMessage');
       const text = input.value.trim();
       if (!text) return;
-      
+
       // Optimistic UI: show message immediately with sending state
       const tempMessage = { type: 'sent', text, timestamp: Date.now(), sending: true };
       this.saveMessage(this.currentChatPeer.id, tempMessage);
       this.renderChatHistory(this.currentChatPeer.id);
-      
+
       // Disable input and show loading state
       input.value = '';
       input.disabled = true;
       btn.disabled = true;
       btn.classList.add('sending');
-      
+
       try {
         await this.webrtc.sendText(this.currentChatPeer.id, text);
         // Mark message as sent
@@ -1483,7 +1492,7 @@ class CloudDrop {
         input.focus();
       }
     });
-    
+
     document.getElementById('chatInput')?.addEventListener('keydown', async (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -1501,9 +1510,9 @@ class CloudDrop {
     const closeBtn = document.getElementById('sharePopoverClose');
     const copyCodeBtn = document.getElementById('sharePopoverCopyCode');
     const copyLinkBtn = document.getElementById('sharePopoverCopyLink');
-    
+
     if (!shareBtn || !popover) return;
-    
+
     // Create overlay for click-outside-to-close
     let overlay = document.querySelector('.share-popover-overlay');
     if (!overlay) {
@@ -1511,11 +1520,11 @@ class CloudDrop {
       overlay.className = 'share-popover-overlay';
       document.body.appendChild(overlay);
     }
-    
+
     const showPopover = () => {
       // Update room code display
       document.getElementById('sharePopoverRoomCode').textContent = this.roomCode || '-';
-      
+
       // Generate QR code
       const canvas = document.getElementById('shareQRCode');
       if (canvas && this.roomCode) {
@@ -1523,16 +1532,16 @@ class CloudDrop {
         url.searchParams.set('room', this.roomCode);
         ui.generateQRCode(canvas, url.toString(), { size: 160 });
       }
-      
+
       popover.classList.add('active');
       overlay.classList.add('active');
     };
-    
+
     const hidePopover = () => {
       popover.classList.remove('active');
       overlay.classList.remove('active');
     };
-    
+
     // Toggle popover on share button click
     shareBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1542,43 +1551,45 @@ class CloudDrop {
         showPopover();
       }
     });
-    
-    // Also open popover when clicking room code (desktop only)
+
+    // Click room code to copy
     roomCodeEl?.addEventListener('click', (e) => {
-      if (window.innerWidth > 640) {
-        e.stopPropagation();
-        showPopover();
+      e.stopPropagation();
+      if (this.roomCode) {
+        navigator.clipboard.writeText(this.roomCode);
+        ui.showToast('房间号已复制', 'success');
+        this.triggerHaptic('light');
       }
     });
-    
+
     // Close button
     closeBtn?.addEventListener('click', hidePopover);
-    
+
     // Click outside to close
     overlay.addEventListener('click', hidePopover);
-    
+
     // Copy room code
     copyCodeBtn?.addEventListener('click', () => {
       navigator.clipboard.writeText(this.roomCode);
       ui.showToast('房间号已复制', 'success');
-      
+
       // Visual feedback
       copyCodeBtn.classList.add('copied');
       setTimeout(() => copyCodeBtn.classList.remove('copied'), 1000);
     });
-    
+
     // Copy link
     copyLinkBtn?.addEventListener('click', () => {
       const url = new URL(location.href);
       url.searchParams.set('room', this.roomCode);
       navigator.clipboard.writeText(url.toString());
       ui.showToast('链接已复制', 'success');
-      
+
       // Visual feedback
       copyLinkBtn.classList.add('copied');
       setTimeout(() => copyLinkBtn.classList.remove('copied'), 1000);
     });
-    
+
     // Close on Escape key
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && popover.classList.contains('active')) {
@@ -1712,7 +1723,7 @@ class CloudDrop {
       ui.showToast('没有可用的设备', 'warning');
       return;
     }
-    
+
     const panel = document.getElementById('mobileQuickActions');
     if (panel) {
       panel.classList.add('active');
@@ -1731,34 +1742,34 @@ class CloudDrop {
   showMobileSettings() {
     document.getElementById('settingsDeviceName').textContent = this.deviceName;
     document.getElementById('settingsRoomCode').textContent = this.roomCode;
-    
+
     const statusEl = document.getElementById('settingsStatus');
     const statusTextEl = document.getElementById('settingsStatusText');
     const mainStatusEl = document.getElementById('connectionStatus');
-    
+
     if (statusEl && mainStatusEl) {
       statusEl.className = 'settings-value';
       const dotEl = statusEl.querySelector('.status-dot');
       if (dotEl) {
-        dotEl.style.background = mainStatusEl.classList.contains('connected') 
-          ? 'var(--status-success)' 
+        dotEl.style.background = mainStatusEl.classList.contains('connected')
+          ? 'var(--status-success)'
           : mainStatusEl.classList.contains('disconnected')
             ? 'var(--status-error)'
             : 'var(--status-warning)';
       }
     }
-    
+
     if (statusTextEl) {
-      statusTextEl.textContent = mainStatusEl?.classList.contains('connected') 
-        ? '已连接' 
+      statusTextEl.textContent = mainStatusEl?.classList.contains('connected')
+        ? '已连接'
         : mainStatusEl?.classList.contains('disconnected')
           ? '已断开'
           : '连接中...';
     }
-    
+
     // Render trusted devices list
     this.renderTrustedDevicesList();
-    
+
     ui.showModal('mobileSettingsModal');
   }
 
@@ -1768,20 +1779,20 @@ class CloudDrop {
   renderTrustedDevicesList() {
     const container = document.getElementById('trustedDevicesList');
     if (!container) return;
-    
+
     const devices = this.getTrustedDevicesList();
-    
+
     if (devices.length === 0) {
       container.innerHTML = '<p class="trusted-empty">暂无信任的设备</p>';
       return;
     }
-    
+
     const deviceTypeIcons = {
       desktop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
       mobile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>',
       tablet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M12 18h.01"/></svg>'
     };
-    
+
     container.innerHTML = devices.map(device => `
       <div class="trusted-device-item" data-fingerprint="${device.fingerprint}">
         <div class="trusted-device-info">
@@ -1800,15 +1811,15 @@ class CloudDrop {
         </button>
       </div>
     `).join('');
-    
+
     // Add click handlers for untrust buttons
     container.querySelectorAll('.btn-untrust').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         const fingerprint = e.currentTarget.dataset.fingerprint;
         const deviceInfo = this.trustedDevices.get(fingerprint);
-        
+
         if (!deviceInfo) return;
-        
+
         const confirmed = await ui.showConfirmDialog({
           title: '取消信任设备',
           message: `确定要取消信任「<strong>${ui.escapeHtml(deviceInfo.name)}</strong>」吗？<br><br><span style="color: var(--text-muted)">取消后，该设备发送文件时需要您手动确认。</span>`,
@@ -1816,7 +1827,7 @@ class CloudDrop {
           cancelText: '保留信任',
           type: 'warning'
         });
-        
+
         if (confirmed) {
           const info = this.removeTrustedDevice(fingerprint);
           if (info) {
@@ -1893,7 +1904,7 @@ class CloudDrop {
   setupKeyboardDetection() {
     // Use focus/blur events to detect keyboard
     const inputs = document.querySelectorAll('input, textarea');
-    
+
     inputs.forEach(input => {
       input.addEventListener('focus', () => {
         // Small delay to let keyboard animate
@@ -1901,7 +1912,7 @@ class CloudDrop {
           document.documentElement.classList.add('keyboard-visible');
         }, 100);
       });
-      
+
       input.addEventListener('blur', () => {
         setTimeout(() => {
           document.documentElement.classList.remove('keyboard-visible');
@@ -1914,16 +1925,16 @@ class CloudDrop {
   setupVisualViewport() {
     if (window.visualViewport) {
       const viewport = window.visualViewport;
-      
+
       const handleViewportChange = () => {
         // Calculate keyboard height
         const keyboardHeight = window.innerHeight - viewport.height;
-        
+
         if (keyboardHeight > 100) {
           // Keyboard is visible
           document.documentElement.style.setProperty('--keyboard-height', `${keyboardHeight}px`);
           document.documentElement.classList.add('keyboard-visible');
-          
+
           // Scroll active element into view
           const activeElement = document.activeElement;
           if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
@@ -1937,7 +1948,7 @@ class CloudDrop {
           document.documentElement.classList.remove('keyboard-visible');
         }
       };
-      
+
       viewport.addEventListener('resize', handleViewportChange);
       viewport.addEventListener('scroll', handleViewportChange);
     }
