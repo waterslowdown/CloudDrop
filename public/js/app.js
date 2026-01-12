@@ -534,8 +534,11 @@ class CloudDrop {
       }
 
       // If chat panel is open for this peer, update UI immediately
+      // Use requestAnimationFrame to ensure smooth update without blocking
       if (this.currentChatPeer && this.currentChatPeer.id === peerId) {
-        this.renderChatHistory(peerId);
+        requestAnimationFrame(() => {
+          this.renderChatHistory(peerId);
+        });
         return;
       }
 
@@ -1170,7 +1173,11 @@ class CloudDrop {
     document.getElementById('chatTitle').textContent = `与 ${peer.name} 的消息`;
     this.renderChatHistory(peer.id);
     document.getElementById('chatPanel').classList.add('active');
-    document.getElementById('chatInput').focus();
+
+    // Focus input after a short delay to ensure panel is visible
+    setTimeout(() => {
+      document.getElementById('chatInput')?.focus();
+    }, 100);
 
     // Clear unread messages
     this.unreadMessages.set(peer.id, 0);
@@ -1272,8 +1279,31 @@ class CloudDrop {
       container.appendChild(msgEl);
     });
 
-    // Scroll to bottom
+    // Use requestAnimationFrame to ensure DOM is fully updated before scrolling
+    // This handles async image loading and prevents race conditions
+    requestAnimationFrame(() => {
+      this.scrollChatToBottom(container);
+    });
+  }
+
+  /**
+   * Scroll chat container to bottom
+   * Uses delayed scroll to handle async image loading
+   */
+  scrollChatToBottom(container) {
+    if (!container) {
+      container = document.getElementById('chatMessages');
+    }
+    if (!container) return;
+
+    // Immediate scroll
     container.scrollTop = container.scrollHeight;
+
+    // Delayed scroll to handle image loading
+    // This ensures images are loaded and scrollHeight is accurate
+    setTimeout(() => {
+      container.scrollTop = container.scrollHeight;
+    }, 50);
   }
 
   formatTime(timestamp) {
