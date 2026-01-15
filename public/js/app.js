@@ -313,6 +313,9 @@ class CloudDrop {
     // Initialize i18n first
     await i18n.init({ defaultLocale: 'zh' });
 
+    // Setup language switcher early so it's available during connection
+    this.setupLanguageSwitcher();
+
     await cryptoManager.generateKeyPair();
     // Check URL for room code - only use explicit room parameter
     // If no room param, let server assign room based on IP
@@ -422,6 +425,14 @@ class CloudDrop {
           ui.updateTransferModeIndicator(indicator.dataset.mode);
         }
       }
+      // 更新所有 peer 卡片的连接模式徽章（包括 connecting 状态）
+      document.querySelectorAll('.connection-mode-badge').forEach(badge => {
+        const mode = badge.dataset.mode;
+        const card = badge.closest('[data-peer-id]');
+        if (card && mode) {
+          ui.updatePeerConnectionMode(card.dataset.peerId, mode);
+        }
+      });
     });
   }
 
