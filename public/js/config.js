@@ -72,6 +72,29 @@ export const TRANSFER = {
 };
 
 // =============================================================================
+// Relay Transfer Reliability Configuration
+// =============================================================================
+export const RELAY = {
+  // Flow control: max unacknowledged chunks before waiting
+  WINDOW_SIZE: 10,
+
+  // ACK timeout before considering chunk lost
+  ACK_TIMEOUT: 5000, // 5 seconds
+
+  // Max retries for a single chunk
+  MAX_CHUNK_RETRIES: 3,
+
+  // Batch ACK: acknowledge every N chunks
+  ACK_BATCH_SIZE: 5,
+
+  // Chunk send interval (throttle)
+  CHUNK_INTERVAL: 5, // 5ms between chunks
+
+  // Transfer timeout (no progress)
+  TRANSFER_TIMEOUT: 30000, // 30 seconds
+};
+
+// =============================================================================
 // UI Configuration
 // =============================================================================
 export const UI = {

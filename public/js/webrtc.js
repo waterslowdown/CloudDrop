@@ -11,7 +11,7 @@
  */
 
 import { cryptoManager } from './crypto.js';
-import { WEBRTC, P2P_RETRY } from './config.js';
+import { WEBRTC, P2P_RETRY, RELAY } from './config.js';
 import { i18n } from './i18n.js';
 
 // Destructure config for convenience
@@ -33,6 +33,42 @@ const {
   INTERVAL: P2P_RETRY_INTERVAL,
   MAX_ATTEMPTS: P2P_RETRY_MAX_ATTEMPTS,
 } = P2P_RETRY;
+
+// =============================================================================
+// Safe Base64 encoding/decoding for large binary data (mobile compatible)
+// =============================================================================
+
+/**
+ * Safely encode ArrayBuffer to base64 string (chunk-based for mobile compatibility)
+ * @param {ArrayBuffer} buffer - Binary data to encode
+ * @returns {string} Base64 encoded string
+ */
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const CHUNK_SIZE = 8192; // Process in 8KB chunks to avoid call stack issues
+  let result = '';
+
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+    result += String.fromCharCode.apply(null, chunk);
+  }
+
+  return btoa(result);
+}
+
+/**
+ * Safely decode base64 string to Uint8Array
+ * @param {string} base64 - Base64 encoded string
+ * @returns {Uint8Array} Decoded binary data
+ */
+function base64ToUint8Array(base64) {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
 
 // Cache for ICE servers with health check results
 let cachedIceServers = null;
@@ -1230,20 +1266,30 @@ export class WebRTCManager {
   }
 
   /**
-   * Send file data via relay (after confirmation)
+   * Send file data via relay with reliability (after confirmation)
+   * Features: flow control, ACK, retransmission, timeout handling
    */
   async _sendFileDataViaRelay(peerId, file, fileId) {
-    // Register active transfer
-    this.activeTransfers.set(fileId, { peerId, direction: 'send', cancelled: false });
-    
+    // Register active transfer with enhanced state
+    const transferState = {
+      peerId,
+      direction: 'send',
+      cancelled: false,
+      ackedChunks: new Set(),      // Chunks that have been acknowledged
+      pendingChunks: new Map(),    // Chunks waiting for ACK: index -> {data, retries, sentAt}
+      lastAckTime: Date.now(),     // Last ACK received time
+    };
+    this.activeTransfers.set(fileId, transferState);
+
     // Ensure we have encryption key before sending
     if (!cryptoManager.hasSharedSecret(peerId)) {
       console.log(`[WebRTC] No shared key for ${peerId}, exchanging keys via signaling...`);
       await this._exchangeKeysViaSignaling(peerId);
     }
-    
+
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
+    // Send file-start with total chunks for integrity check
     this.signaling.send({
       type: 'relay-data',
       to: peerId,
@@ -1252,13 +1298,13 @@ export class WebRTCManager {
         fileId,
         name: file.name,
         size: file.size,
-        mimeType: file.type || 'application/octet-stream', // Add MIME type
+        mimeType: file.type || 'application/octet-stream',
         totalChunks
       }
     });
 
     let offset = 0, chunkIndex = 0, startTime = Date.now();
-    
+
     try {
       while (offset < file.size) {
         // Check if transfer was cancelled
@@ -1267,22 +1313,53 @@ export class WebRTCManager {
           console.log(`[WebRTC] Relay transfer ${fileId} was cancelled`);
           throw new Error('传输已取消');
         }
-        
+
+        // Flow control: wait if too many unacknowledged chunks
+        while (transfer.pendingChunks.size >= RELAY.WINDOW_SIZE) {
+          // Check for timeout
+          if (Date.now() - transfer.lastAckTime > RELAY.ACK_TIMEOUT) {
+            // Retransmit oldest unacked chunk
+            const oldestPending = this._getOldestPendingChunk(transfer);
+            if (oldestPending) {
+              const { index, data, retries } = oldestPending;
+              if (retries >= RELAY.MAX_CHUNK_RETRIES) {
+                console.error(`[WebRTC] Chunk ${index} failed after ${retries} retries`);
+                throw new Error('传输失败：数据块重传次数过多');
+              }
+              console.log(`[WebRTC] Retransmitting chunk ${index}, retry ${retries + 1}`);
+              this._sendChunk(peerId, fileId, index, data.base64, retries + 1);
+              transfer.pendingChunks.get(index).retries = retries + 1;
+              transfer.pendingChunks.get(index).sentAt = Date.now();
+            }
+          }
+
+          // Check cancellation during wait
+          if (transfer.cancelled) {
+            throw new Error('传输已取消');
+          }
+
+          await new Promise(r => setTimeout(r, 50));
+        }
+
+        // Check transfer timeout (no progress)
+        if (Date.now() - transfer.lastAckTime > RELAY.TRANSFER_TIMEOUT && chunkIndex > 0) {
+          throw new Error('传输超时：接收方无响应');
+        }
+
         const chunk = file.slice(offset, offset + CHUNK_SIZE);
         const buffer = await chunk.arrayBuffer();
         const encrypted = await cryptoManager.encryptChunk(peerId, buffer);
-        
-        const base64Data = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
 
-        this.signaling.send({
-          type: 'relay-data',
-          to: peerId,
-          data: {
-            type: 'chunk',
-            fileId,
-            data: base64Data
-          }
+        const base64Data = arrayBufferToBase64(encrypted);
+
+        // Track pending chunk
+        transfer.pendingChunks.set(chunkIndex, {
+          base64: base64Data,
+          retries: 0,
+          sentAt: Date.now()
         });
+
+        this._sendChunk(peerId, fileId, chunkIndex, base64Data, 0);
 
         offset += CHUNK_SIZE;
         chunkIndex++;
@@ -1296,18 +1373,99 @@ export class WebRTCManager {
             speed: offset / elapsed
           });
         }
-        
-        await new Promise(r => setTimeout(r, 10));
+
+        await new Promise(r => setTimeout(r, RELAY.CHUNK_INTERVAL));
       }
 
+      // Wait for all chunks to be acknowledged
+      const ackWaitStart = Date.now();
+      while (transferState.ackedChunks.size < totalChunks) {
+        if (Date.now() - ackWaitStart > RELAY.ACK_TIMEOUT * 2) {
+          console.warn(`[WebRTC] ACK timeout, ${totalChunks - transferState.ackedChunks.size} chunks unacked`);
+          break;
+        }
+        if (transferState.cancelled) {
+          throw new Error('传输已取消');
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      // Send file-end
       this.signaling.send({
         type: 'relay-data',
         to: peerId,
-        data: { type: 'file-end', fileId }
+        data: { type: 'file-end', fileId, totalChunks }
       });
+
+      console.log(`[WebRTC] Relay transfer complete: ${totalChunks} chunks sent`);
     } finally {
       this.activeTransfers.delete(fileId);
     }
+  }
+
+  /**
+   * Send a single chunk via relay
+   */
+  _sendChunk(peerId, fileId, index, base64Data, retryCount) {
+    this.signaling.send({
+      type: 'relay-data',
+      to: peerId,
+      data: {
+        type: 'chunk',
+        fileId,
+        index,
+        data: base64Data,
+        retry: retryCount > 0
+      }
+    });
+  }
+
+  /**
+   * Get the oldest pending chunk for retransmission
+   */
+  _getOldestPendingChunk(transfer) {
+    let oldest = null;
+    let oldestTime = Infinity;
+    for (const [index, info] of transfer.pendingChunks) {
+      if (info.sentAt < oldestTime) {
+        oldestTime = info.sentAt;
+        oldest = { index, ...info };
+      }
+    }
+    return oldest;
+  }
+
+  /**
+   * Handle ACK from receiver
+   */
+  handleRelayAck(peerId, data) {
+    const { fileId, acks } = data;
+    const transfer = this.activeTransfers.get(fileId);
+    if (!transfer || transfer.direction !== 'send') return;
+
+    // Process acknowledged chunks
+    for (const index of acks) {
+      transfer.ackedChunks.add(index);
+      transfer.pendingChunks.delete(index);
+    }
+    transfer.lastAckTime = Date.now();
+
+    console.log(`[WebRTC] Received ACK for chunks: ${acks.join(',')}, pending: ${transfer.pendingChunks.size}`);
+  }
+
+  /**
+   * Send chunk acknowledgment to sender
+   */
+  _sendChunkAck(peerId, fileId, acks) {
+    this.signaling.send({
+      type: 'relay-data',
+      to: peerId,
+      data: {
+        type: 'ack',
+        fileId,
+        acks
+      }
+    });
   }
 
   // Handle incoming message
@@ -1388,19 +1546,36 @@ export class WebRTCManager {
     if (data.type === 'file-start') {
       // Check if we have a pre-confirmed transfer (from file-request flow)
       const existingTransfer = this.incomingTransfers.get(peerId);
-      
+
       if (existingTransfer && existingTransfer.confirmed && existingTransfer.fileId === data.fileId) {
-        // Transfer was already confirmed, update with actual start time
+        // Transfer was already confirmed - RESET chunks array to avoid stale data!
         existingTransfer.startTime = Date.now();
+        existingTransfer.chunks = [];  // Critical: clear any residual chunks
+        existingTransfer.received = 0;
+        existingTransfer.totalChunks = data.totalChunks;
+        existingTransfer.receivedIndices = new Set(); // Track received chunk indices
         // Register as active transfer for cancellation support
         this.activeTransfers.set(data.fileId, { peerId, direction: 'receive', cancelled: false });
-        console.log(`[WebRTC] Starting confirmed relay file transfer: ${data.name}`);
+        console.log(`[WebRTC] Starting confirmed relay file transfer: ${data.name} (chunks reset)`);
       } else {
-        // Initialize new transfer
+        // Clean up any stale transfer first
+        if (existingTransfer) {
+          console.log(`[WebRTC] Cleaning up stale transfer for peer ${peerId}`);
+          this.incomingTransfers.delete(peerId);
+          if (existingTransfer.fileId) {
+            this.activeTransfers.delete(existingTransfer.fileId);
+          }
+        }
+
+        // Initialize new transfer with fresh state
         this.incomingTransfers.set(peerId, {
           fileId: data.fileId, name: data.name, size: data.size,
-          mimeType: data.mimeType || 'application/octet-stream', // Save MIME type
-          totalChunks: data.totalChunks, chunks: [], received: 0, startTime: Date.now(),
+          mimeType: data.mimeType || 'application/octet-stream',
+          totalChunks: data.totalChunks,
+          chunks: [],           // Fresh empty array
+          receivedIndices: new Set(), // Track received chunk indices
+          received: 0,
+          startTime: Date.now(),
           confirmed: true
         });
         // Register as active transfer
@@ -1416,7 +1591,44 @@ export class WebRTCManager {
     } else if (data.type === 'file-end') {
       const transfer = this.incomingTransfers.get(peerId);
       if (transfer) {
-        const blob = new Blob(transfer.chunks, { type: transfer.mimeType || 'application/octet-stream' }); // Use MIME type
+        // Send any remaining ACKs
+        if (transfer.pendingAcks && transfer.pendingAcks.length > 0) {
+          this._sendChunkAck(peerId, transfer.fileId, transfer.pendingAcks);
+        }
+
+        // Verify integrity: check all chunks are present
+        const receivedCount = transfer.receivedIndices ? transfer.receivedIndices.size : 0;
+        const expectedCount = data.totalChunks || transfer.totalChunks;
+
+        if (receivedCount !== expectedCount) {
+          console.error(`[WebRTC] Transfer incomplete: expected ${expectedCount} chunks, received ${receivedCount}`);
+          // Find missing chunks
+          const missing = [];
+          for (let i = 0; i < expectedCount; i++) {
+            if (!transfer.receivedIndices || !transfer.receivedIndices.has(i)) {
+              missing.push(i);
+            }
+          }
+          console.error(`[WebRTC] Missing chunks: ${missing.join(', ')}`);
+        }
+
+        // Build blob from chunks in correct order
+        const orderedChunks = [];
+        for (let i = 0; i < expectedCount; i++) {
+          if (transfer.chunks[i]) {
+            orderedChunks.push(transfer.chunks[i]);
+          }
+        }
+
+        const blob = new Blob(orderedChunks, { type: transfer.mimeType || 'application/octet-stream' });
+
+        // Verify size
+        if (blob.size !== transfer.size) {
+          console.warn(`[WebRTC] Size mismatch: expected ${transfer.size}, got ${blob.size}`);
+        }
+
+        console.log(`[WebRTC] Transfer complete: ${receivedCount}/${expectedCount} chunks, size: ${blob.size}`);
+
         if (this.onFileReceived) this.onFileReceived(peerId, transfer.name, blob);
         this.incomingTransfers.delete(peerId);
         this.activeTransfers.delete(transfer.fileId);
@@ -1424,26 +1636,55 @@ export class WebRTCManager {
     } else if (data.type === 'chunk') {
       const transfer = this.incomingTransfers.get(peerId);
       if (transfer && transfer.fileId === data.fileId) {
-        const binaryString = atob(data.data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        
-        const decrypted = await cryptoManager.decryptChunk(peerId, bytes.buffer);
-        transfer.chunks.push(new Uint8Array(decrypted));
-        transfer.received += decrypted.byteLength;
+        const chunkIndex = data.index !== undefined ? data.index : transfer.chunks.length;
 
-        if (this.onProgress) {
-          const elapsed = (Date.now() - transfer.startTime) / 1000;
-          this.onProgress({
-            peerId, fileId: transfer.fileId, fileName: transfer.name, fileSize: transfer.size,
-            sent: transfer.received, total: transfer.size,
-            percent: (transfer.received / transfer.size) * 100,
-            speed: transfer.received / elapsed
-          });
+        // Skip duplicate chunks (from retransmission)
+        if (transfer.receivedIndices && transfer.receivedIndices.has(chunkIndex)) {
+          console.log(`[WebRTC] Skipping duplicate chunk ${chunkIndex}`);
+          // Still send ACK for duplicate to confirm receipt
+          this._sendChunkAck(peerId, data.fileId, [chunkIndex]);
+          return;
+        }
+
+        try {
+          const bytes = base64ToUint8Array(data.data);
+
+          const decrypted = await cryptoManager.decryptChunk(peerId, bytes.buffer);
+
+          // Place chunk in correct position
+          transfer.chunks[chunkIndex] = new Uint8Array(decrypted);
+          transfer.received += decrypted.byteLength;
+
+          // Mark as received
+          if (!transfer.receivedIndices) transfer.receivedIndices = new Set();
+          transfer.receivedIndices.add(chunkIndex);
+
+          // Batch ACK: send ACK every N chunks
+          if (!transfer.pendingAcks) transfer.pendingAcks = [];
+          transfer.pendingAcks.push(chunkIndex);
+
+          if (transfer.pendingAcks.length >= RELAY.ACK_BATCH_SIZE) {
+            this._sendChunkAck(peerId, data.fileId, transfer.pendingAcks);
+            transfer.pendingAcks = [];
+          }
+
+          if (this.onProgress) {
+            const elapsed = (Date.now() - transfer.startTime) / 1000;
+            this.onProgress({
+              peerId, fileId: transfer.fileId, fileName: transfer.name, fileSize: transfer.size,
+              sent: transfer.received, total: transfer.size,
+              percent: (transfer.received / transfer.size) * 100,
+              speed: transfer.received / elapsed
+            });
+          }
+        } catch (err) {
+          console.error(`[WebRTC] Error processing chunk ${chunkIndex}:`, err);
+          // Request retransmission by not sending ACK
         }
       }
+    } else if (data.type === 'ack') {
+      // Handle ACK from receiver
+      this.handleRelayAck(peerId, data);
     } else if (data.type === 'text') {
       if (this.onTextReceived) this.onTextReceived(peerId, data.content);
     }
