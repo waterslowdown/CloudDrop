@@ -1789,8 +1789,12 @@ body::before {
     padding-bottom: calc(70px + var(--safe-area-bottom));
   }
   
-  /* Header: 单行紧凑布局 */
+  /* Header: 单行紧凑布局，使用fixed定位避免缩放后错位 */
   .header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
     flex-direction: row;
     flex-wrap: nowrap;
     align-items: center;
@@ -1880,10 +1884,10 @@ body::before {
     display: none;
   }
   
-  /* 主内容区 */
+  /* 主内容区 - 需要补偿fixed header的高度 */
   .main {
     padding: var(--space-md);
-    padding-top: var(--space-lg);
+    padding-top: calc(56px + var(--safe-area-top) + var(--space-lg));
     min-height: calc(100vh - 56px - 70px - var(--safe-area-top) - var(--safe-area-bottom));
     justify-content: flex-start;
     padding-bottom: var(--space-xl);
