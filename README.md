@@ -43,6 +43,8 @@
 - ⏹️ **Transfer Control** - Cancel ongoing transfers at any time
 - 📊 **Connection Indicator** - Visual indicator showing P2P or relay mode
 - 📲 **Mobile Optimized** - Touch-friendly UI with bottom navigation bar
+- 🖼️ **Image Messaging** - Send and receive images in chat
+- 🌍 **Multi-language Support** - Available in 9 languages (English, 简体中文, 繁體中文, 日本語, 한국어, Español, Français, Deutsch, العربية)
 
 ## 🖼️ Screenshots
 
@@ -137,7 +139,8 @@ cloudDrop/
 │       ├── config.js    # Unified configuration constants
 │       ├── ui.js        # UI components & helpers
 │       ├── webrtc.js    # WebRTC + relay fallback + P2P recovery
-│       └── crypto.js    # Encryption (AES-GCM + room password)
+│       ├── crypto.js    # Encryption (AES-GCM + room password)
+│       └── i18n.js      # Internationalization (9 languages)
 ├── src/
 │   ├── index.ts         # Worker entry point
 │   └── room.ts          # Durable Object for WebSocket rooms
@@ -152,6 +155,7 @@ cloudDrop/
 - **Transfer**: WebRTC Data Channels (P2P) + WebSocket relay (fallback)
 - **Encryption**: Web Crypto API (AES-256-GCM, ECDH key exchange)
 - **Frontend**: Vanilla JavaScript + Modern CSS
+- **i18n**: 9 languages with auto-detection
 
 ## 🔒 Security
 

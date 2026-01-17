@@ -43,6 +43,8 @@
 - ⏹️ **传输控制** - 随时取消进行中的传输
 - 📊 **连接模式指示** - 可视化显示 P2P 或中继模式
 - 📲 **移动端优化** - 触摸友好的 UI，底部导航栏
+- 🖼️ **图片消息** - 在聊天中发送和接收图片
+- 🌍 **多语言支持** - 支持 9 种语言（简体中文、繁體中文、English、日本語、한국어、Español、Français、Deutsch、العربية）
 
 ## 🖼️ 截图
 
@@ -137,7 +139,8 @@ cloudDrop/
 │       ├── config.js    # 统一配置常量
 │       ├── ui.js        # UI 组件和辅助函数
 │       ├── webrtc.js    # WebRTC + 中继降级 + P2P 恢复
-│       └── crypto.js    # 加密（AES-GCM + 房间密码）
+│       ├── crypto.js    # 加密（AES-GCM + 房间密码）
+│       └── i18n.js      # 国际化（9 种语言）
 ├── src/
 │   ├── index.ts         # Worker 入口
 │   └── room.ts          # WebSocket 房间的 Durable Object
@@ -152,6 +155,7 @@ cloudDrop/
 - **文件传输**: WebRTC Data Channels (P2P) + WebSocket 中继（备用）
 - **加密**: Web Crypto API (AES-256-GCM, ECDH 密钥交换)
 - **前端**: 原生 JavaScript + 现代 CSS
+- **国际化**: 9 种语言，自动检测
 
 ## 🔒 安全性
 
