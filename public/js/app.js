@@ -473,7 +473,7 @@ class CloudDrop {
            <polygon points="14,7 14.4,8.2 13.2,7.4 14.8,7.4 13.6,8.2" fill="#FFDE00"/>
            <polygon points="12,9 12.4,10.2 11.2,9.4 12.8,9.4 11.6,10.2" fill="#FFDE00"/>`,
       'zh-HK': `<rect width="36" height="24" fill="#DE2110"/>
-           <g transform="translate(18,12) scale(0.75)">
+           <g transform="translate(18,10) scale(0.75)">
              <g fill="white">
                <ellipse cx="0" cy="-5" rx="2" ry="4.5" transform="rotate(0)"/>
                <ellipse cx="0" cy="-5" rx="2" ry="4.5" transform="rotate(72)"/>
